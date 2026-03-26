@@ -1315,7 +1315,6 @@
           if (!response.ok) throw new Error('Download failed');
 
           const blob = await response.blob();
-          const blobUrl = URL.createObjectURL(blob);
 
           // Determine file extension from URL or Content-Type
           let extension = '.mp4'; // Default for Sora videos
@@ -1335,9 +1334,21 @@
           } catch {}
 
           // Create temporary anchor element to trigger download
+          const filename = `sora-draft-${draftId}${extension}`;
+          const postedAtMs = resolvePostedTimestampMs(draftId);
+          const downloadFile =
+            Number.isFinite(postedAtMs) && postedAtMs > 0
+              ? new File([blob], filename, {
+                  type: blob.type || 'application/octet-stream',
+                  lastModified: postedAtMs,
+                })
+              : new File([blob], filename, {
+                  type: blob.type || 'application/octet-stream',
+                });
+          const blobUrl = URL.createObjectURL(downloadFile);
           const a = document.createElement('a');
           a.href = blobUrl;
-          a.download = `sora-draft-${draftId}${extension}`;
+          a.download = filename;
           a.style.display = 'none';
           document.body.appendChild(a);
           a.click();
@@ -7616,6 +7627,12 @@ async function renderAnalyzeTable(force = false) {
       .replace(/_+/g, '_')
       .replace(/^_+|_+$/g, '');
     return cleaned || fallback;
+  }
+
+  function resolvePostedTimestampMs(id) {
+    const meta = idToMeta.get(id) || null;
+    const ts = Number(meta?.createdAtMs);
+    return Number.isFinite(ts) && ts > 0 ? ts : null;
   }
 
   function resolvePublicDownloadUrl(item) {
