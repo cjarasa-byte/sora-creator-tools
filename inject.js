@@ -281,6 +281,7 @@
   let gatherScrollRafId = null;
   let gatherRefreshTimeoutId = null;
   let gatherCountdownIntervalId = null;
+  let publicIndexHydrationInFlight = false;
   let isGatheringActiveThisTab = false;
 
   // Analyze (Top feed only)
@@ -5243,9 +5244,9 @@ async function renderAnalyzeTable(force = false) {
     // Scroll loop tuned for low overhead:
     // - RAF for smooth motion when actively moving
     // - throttled layout reads while waiting near the bottom for fresh content
-    const BOTTOM_THRESHOLD = 100;
-    const BOTTOM_RECHECK_MS = 220;
-    const BOTTOM_IDLE_WAIT_MS = 550;
+    const BOTTOM_THRESHOLD = 140;
+    const BOTTOM_RECHECK_MS = 120;
+    const BOTTOM_IDLE_WAIT_MS = 220;
     function startSmoothAutoScroll(pxPerSecond) {
       const scrollPxPerSecond = Math.max(16, Number(pxPerSecond) || 60);
       const scrollingElement = document.scrollingElement || document.documentElement || document.body;
@@ -5311,7 +5312,7 @@ async function renderAnalyzeTable(force = false) {
 
       const TOP_REFRESH_FAST = 10 * 60 * 1000;
       const TOP_REFRESH_SLOW = 3 * 60 * 60 * 1000;
-      const TOP_PX_PER_STEP_FAST = 7; // current speed baseline
+      const TOP_PX_PER_STEP_FAST = 28; // accelerated baseline for much faster top-feed traversal
       const lerp = (a, b, u) => a + (b - a) * u;
 
       const now = Date.now();
@@ -5337,9 +5338,9 @@ async function renderAnalyzeTable(force = false) {
     const t = Math.min(1, Math.max(0, Number(speedValue) / 100));
 
     // Map slider to pixels-per-second (slow → fast)
-    const PPS_SLOW = 100;    // px/s at far left
-    const PPS_MID = 900;   // px/s mid
-    const PPS_FAST = 1800;    // px/s far right
+    const PPS_SLOW = 260;    // px/s at far left
+    const PPS_MID = 1900;   // px/s mid
+    const PPS_FAST = 3600;    // px/s far right
 
     const lerp = (a, b, u) => a + (b - a) * u;
     let pps;
@@ -7560,6 +7561,17 @@ async function renderAnalyzeTable(force = false) {
   }
 
   async function bulkDownloadPublicPosts() {
+    if (!publicIndexHydrationInFlight && (isTopFeed() || isProfile())) {
+      const shouldHydrate = confirm('Load more public videos first before bulk download?\n\nOK = fetch additional pages now\nCancel = only download videos already loaded on this page');
+      if (shouldHydrate) {
+        try {
+          await hydratePublicVideoIndex();
+        } catch (err) {
+          console.error('[SoraUV] Public index hydration failed:', err);
+        }
+      }
+    }
+
     const downloadedIds = getPublicDownloadedIds();
     const candidates = [...idToPublicDownloadUrl.entries()]
       .map(([postId, url]) => ({ postId: String(postId || '').trim(), url: String(url || '').trim() }))
@@ -7593,6 +7605,117 @@ async function renderAnalyzeTable(force = false) {
     if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
     if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
     if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
+  }
+
+  function detectFeedNextCursor(payload) {
+    if (!payload || typeof payload !== 'object') return '';
+    const candidates = [
+      payload?.next_cursor,
+      payload?.nextCursor,
+      payload?.cursor,
+      payload?.page_cursor,
+      payload?.pagination?.next_cursor,
+      payload?.pagination?.nextCursor,
+      payload?.meta?.next_cursor,
+      payload?.data?.next_cursor,
+      payload?.data?.nextCursor,
+      payload?.data?.cursor,
+      payload?.data?.pagination?.next_cursor,
+      payload?.data?.pagination?.nextCursor,
+    ];
+    for (const candidate of candidates) {
+      if (candidate == null) continue;
+      const value = String(candidate || '').trim();
+      if (value) return value;
+    }
+    return '';
+  }
+
+  function addCursorToUrl(url, cursor, attemptIndex) {
+    if (!cursor) return url;
+    const names = ['cursor', 'page_cursor', 'next_cursor'];
+    const nextUrl = new URL(url, location.origin);
+    nextUrl.searchParams.delete('cursor');
+    nextUrl.searchParams.delete('page_cursor');
+    nextUrl.searchParams.delete('next_cursor');
+    nextUrl.searchParams.set(names[Math.max(0, Math.min(names.length - 1, attemptIndex || 0))], cursor);
+    return nextUrl.toString();
+  }
+
+  async function hydratePublicVideoIndex() {
+    if (publicIndexHydrationInFlight) return;
+    const baseUrl = (() => {
+      try {
+        const url = new URL(location.href);
+        url.searchParams.delete('gather');
+        return url.toString();
+      } catch {
+        return location.href;
+      }
+    })();
+
+    publicIndexHydrationInFlight = true;
+    if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Loading...');
+    if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
+    if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
+
+    let totalItems = 0;
+    let cursor = '';
+    let usedCursor = false;
+    let attemptIndex = 0;
+    const seenCursors = new Set();
+    const MAX_PAGES = 120;
+    const MAX_NO_GROWTH = 4;
+    let noGrowthStreak = 0;
+    try {
+      for (let page = 0; page < MAX_PAGES; page += 1) {
+        const url = usedCursor ? addCursorToUrl(baseUrl, cursor, attemptIndex) : baseUrl;
+        const beforeCount = idToPublicDownloadUrl.size;
+        const response = await fetch(url, {
+          method: 'GET',
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+        });
+        if (!response.ok) break;
+        const json = await response.json();
+        processFeedJson(json);
+
+        const items = json?.items || json?.data?.items || [];
+        totalItems += items.length;
+        const afterCount = idToPublicDownloadUrl.size;
+        if (afterCount <= beforeCount) noGrowthStreak += 1;
+        else noGrowthStreak = 0;
+        if (noGrowthStreak >= MAX_NO_GROWTH) break;
+
+        const nextCursor = detectFeedNextCursor(json);
+        if (!nextCursor || seenCursors.has(nextCursor)) {
+          if (!usedCursor && attemptIndex < 2) {
+            usedCursor = true;
+            attemptIndex += 1;
+            continue;
+          }
+          break;
+        }
+        seenCursors.add(nextCursor);
+        usedCursor = true;
+        cursor = nextCursor;
+
+        if (publicBulkDownloadBtn?.setLabel) {
+          publicBulkDownloadBtn.setLabel(`Load ${afterCount}...`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      publicIndexHydrationInFlight = false;
+      if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
+      if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
+      if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
+      if (totalItems > 0) {
+        try {
+          console.info(`[SoraUV] Loaded ${totalItems} public feed item(s); ${idToPublicDownloadUrl.size} downloadable video(s) indexed.`);
+        } catch {}
+      }
+    }
   }
 
   // == Bookmarks (Drafts) ==
