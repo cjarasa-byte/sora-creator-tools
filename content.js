@@ -15,6 +15,7 @@
   const MAX_HANDLE_LEN = 80;
   const MAX_REQUEST_ID_LEN = 80;
   const MAX_CAMEO_USERNAMES = 32;
+  const MAX_DOWNLOAD_FILENAME_LEN = 240;
 
   function sanitizeString(value, maxLen = MAX_STR_LEN) {
     if (typeof value !== 'string') return null;
@@ -155,6 +156,29 @@
   function normalizeSnapshotMode(mode) {
     const s = sanitizeString(mode, 16);
     return s && s.toLowerCase() === 'all' ? 'all' : 'latest';
+  }
+
+  function sanitizeDownloadFilename(value) {
+    const s = sanitizeString(value, MAX_DOWNLOAD_FILENAME_LEN);
+    if (!s) return null;
+    const cleaned = s
+      .replace(/\\/g, '/')
+      .replace(/\/+/g, '/')
+      .replace(/^\/+|\/+$/g, '');
+    if (!cleaned) return null;
+    const segments = cleaned.split('/').slice(0, 6);
+    const safe = [];
+    for (const seg of segments) {
+      const part = seg.trim();
+      if (!part || part === '.' || part === '..') continue;
+      if (part.length > 100) {
+        safe.push(part.slice(0, 100));
+      } else {
+        safe.push(part);
+      }
+    }
+    if (!safe.length) return null;
+    return safe.join('/');
   }
 
   function postMetricsResponse(req, metrics = { users: {} }, metricsUpdatedAt = 0) {
@@ -368,6 +392,39 @@
       });
     } catch {
       postMetricsResponse(req);
+    }
+  });
+
+  window.addEventListener('message', function(ev) {
+    if (ev?.source !== window) return;
+    const d = ev?.data;
+    if (!d || d.__sora_uv__ !== true || d.type !== 'download_file_request') return;
+    const requestId = sanitizeRequestId(d.requestId);
+    const url = sanitizeString(d.url, MAX_URL_LEN);
+    const filename = sanitizeDownloadFilename(d.filename);
+    const respond = (ok) => {
+      if (!requestId) return;
+      try {
+        window.postMessage(
+          { __sora_uv__: true, type: 'download_file_response', requestId, ok: ok === true },
+          PAGE_ORIGIN
+        );
+      } catch {}
+    };
+    if (!requestId || !url || !filename) {
+      respond(false);
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage({ action: 'download_file', url, filename }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          respond(false);
+          return;
+        }
+        respond(response.ok === true);
+      });
+    } catch {
+      respond(false);
     }
   });
 })();

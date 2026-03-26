@@ -14,6 +14,7 @@ const TRUSTED_TAB_URL_RE = /^https:\/\/sora\.chatgpt\.com\//i;
 const MAX_MESSAGE_BATCH_ITEMS = 250;
 const MAX_SNAPSHOT_HISTORY_PER_POST = 720;
 const MAX_PROFILE_SERIES_POINTS = 720;
+const MAX_DOWNLOAD_FILENAME_LEN = 240;
 
 // Debug toggles
 const DEBUG = { storage: false, thumbs: false };
@@ -201,6 +202,25 @@ function sanitizeMetricsRequest(message) {
     windowHours: null,
     snapshotMode: normalizeSnapshotMode(message?.snapshotMode),
   };
+}
+
+function sanitizeDownloadFilename(value) {
+  const s = sanitizeString(value, MAX_DOWNLOAD_FILENAME_LEN);
+  if (!s) return null;
+  const cleaned = s
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '/')
+    .replace(/^\/+|\/+$/g, '');
+  if (!cleaned) return null;
+  const segments = cleaned.split('/').slice(0, 6);
+  const safe = [];
+  for (const seg of segments) {
+    const part = seg.trim();
+    if (!part || part === '.' || part === '..') continue;
+    safe.push(part.length > 100 ? part.slice(0, 100) : part);
+  }
+  if (!safe.length) return null;
+  return safe.join('/');
 }
 
 function isTrustedSender(sender) {
@@ -826,6 +846,28 @@ function openOrFocusDashboard(sendResponse) {
   });
 }
 
+function startBackgroundDownload(message, sendResponse) {
+  const url = sanitizeString(message?.url, 2048);
+  const filename = sanitizeDownloadFilename(message?.filename);
+  if (!url || !filename) {
+    sendResponse({ ok: false });
+    return false;
+  }
+  chrome.downloads.download({
+    url,
+    filename,
+    saveAs: false,
+    conflictAction: 'uniquify',
+  }, (downloadId) => {
+    if (chrome.runtime.lastError || typeof downloadId !== 'number') {
+      sendResponse({ ok: false });
+      return;
+    }
+    sendResponse({ ok: true, downloadId });
+  });
+  return true;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isPlainObject(message) || typeof message.action !== 'string') return false;
   if (!isTrustedSender(sender)) {
@@ -838,6 +880,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'open_dashboard') {
     openOrFocusDashboard(sendResponse);
     return true; // Keep message channel open for async response
+  }
+
+  if (message.action === 'download_file') {
+    return startBackgroundDownload(message, sendResponse);
   }
 
   if (message.action === 'metrics_batch') {
