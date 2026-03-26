@@ -212,6 +212,11 @@
   try {
     chrome.runtime.onMessage.addListener((message) => {
       if (message?.action === 'ultra_mode_changed') syncUltraModePreference();
+      if (message?.action === 'purge_download_history') {
+        try {
+          window.postMessage({ __sora_uv__: true, type: 'purge_download_history' }, PAGE_ORIGIN);
+        } catch {}
+      }
     });
   } catch {}
 

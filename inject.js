@@ -43,6 +43,7 @@
   const ANALYZE_VISITED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
   const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
   const PUBLIC_DOWNLOADS_KEY = 'SORA_UV_PUBLIC_DOWNLOADS_V1';
+  const UV_DRAFTS_DB_NAME = 'SORA_UV_DRAFTS_CACHE';
   const TASK_TO_DRAFT_KEY = 'SORA_UV_TASK_TO_DRAFT_V1'; // task_id -> source draft ID for draft remixes
   const VIDEO_GENS_BALANCE_KEY = 'SCT_VIDEO_GENS_BALANCE_V1';
   const VIDEO_GENS_BALANCE_EVENT = 'sct_video_gens_balance';
@@ -7507,6 +7508,75 @@ async function renderAnalyzeTable(force = false) {
       localStorage.setItem(PUBLIC_DOWNLOADS_KEY, JSON.stringify({ ids: Array.from(idsSet || []) }));
     } catch {}
   }
+
+  async function clearUVDraftsIndexedDBCache() {
+    if (typeof indexedDB === 'undefined' || typeof indexedDB.open !== 'function') return false;
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      let openReq = null;
+      try {
+        openReq = indexedDB.open(UV_DRAFTS_DB_NAME);
+      } catch {
+        done(false);
+        return;
+      }
+      openReq.onerror = () => done(false);
+      openReq.onsuccess = () => {
+        const db = openReq.result;
+        if (!db || !db.objectStoreNames) {
+          try { db?.close(); } catch {}
+          done(false);
+          return;
+        }
+        const storeNames = Array.from(db.objectStoreNames || []);
+        if (!storeNames.length) {
+          try { db.close(); } catch {}
+          done(true);
+          return;
+        }
+        let tx = null;
+        try {
+          tx = db.transaction(storeNames, 'readwrite');
+        } catch {
+          try { db.close(); } catch {}
+          done(false);
+          return;
+        }
+        tx.oncomplete = () => {
+          try { db.close(); } catch {}
+          done(true);
+        };
+        tx.onerror = () => {
+          try { db.close(); } catch {}
+          done(false);
+        };
+        tx.onabort = () => {
+          try { db.close(); } catch {}
+          done(false);
+        };
+        for (const storeName of storeNames) {
+          try { tx.objectStore(storeName).clear(); } catch {}
+        }
+      };
+    });
+  }
+
+  async function purgeClientDownloadHistory() {
+    try { localStorage.removeItem(PUBLIC_DOWNLOADS_KEY); } catch {}
+    try { await clearUVDraftsIndexedDBCache(); } catch {}
+  }
+
+  window.addEventListener('message', (ev) => {
+    if (ev?.source !== window) return;
+    const d = ev?.data;
+    if (!d || d.__sora_uv__ !== true || d.type !== 'purge_download_history') return;
+    purgeClientDownloadHistory();
+  });
 
   function markPublicPostDownloaded(postId) {
     const id = String(postId || '').trim();
