@@ -595,6 +595,18 @@
     } catch {}
     return null;
   };
+  const getSpecialCharacter = (item) => {
+    try {
+      const p = item?.post ?? item;
+      const directCandidates = [p?.special_character, p?.specialCharacter, p?.character_name, p?.characterName];
+      for (const candidate of directCandidates) {
+        if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+      }
+      const cameos = getCameoUsernames(item);
+      if (Array.isArray(cameos) && cameos.length > 0) return cameos[0];
+    } catch {}
+    return null;
+  };
   const getFollowerCount = (item) => {
     try {
       const p = item?.post ?? item;
@@ -5834,6 +5846,7 @@ async function renderAnalyzeTable(force = false) {
       const rx = getRemixes(it);
       const cx = getCameos(it);
       const cameoUsernames = getCameoUsernames(it);
+      const specialCharacter = getSpecialCharacter(it);
       if (cameoUsernames && cameoUsernames.length > 0) {
         dlog('feed', 'extracted cameo usernames', { id, cameoUsernames, itemKeys: Object.keys(it || {}), postKeys: Object.keys(it?.post || {}) });
       } else {
@@ -6005,6 +6018,7 @@ async function renderAnalyzeTable(force = false) {
         remix_count: rx,
         cameos: cx,
         cameo_usernames: cameoUsernames,
+        special_character: specialCharacter,
         followers,
         created_at,
         caption,
@@ -6045,6 +6059,7 @@ async function renderAnalyzeTable(force = false) {
           const remixRx = getRemixes(remixItem);
           const remixCx = getCameos(remixItem);
           const remixCameoUsernames = getCameoUsernames(remixItem);
+          const remixSpecialCharacter = getSpecialCharacter(remixItem);
           
           const remixP = remixItem?.post || remixItem || {};
           const remixCreatedAt = remixP?.created_at ?? remixP?.uploaded_at ?? remixP?.createdAt ?? remixP?.created ?? remixP?.posted_at ?? remixP?.timestamp ?? null;
@@ -6135,6 +6150,7 @@ async function renderAnalyzeTable(force = false) {
             remix_count: remixRx,
             cameos: remixCx,
             cameo_usernames: remixCameoUsernames,
+            special_character: remixSpecialCharacter,
             followers: remixFollowers,
             created_at: remixCreatedAt,
             caption: remixCaption,
