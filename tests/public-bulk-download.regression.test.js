@@ -74,7 +74,7 @@ test('resolvePublicDownloadUrl falls back to attachment encoding source path', (
   assert.equal(api.resolvePublicDownloadUrl(sample), 'https://videos.openai.com/example/source.mp4');
 });
 
-test('buildPublicDownloadPath uses username/date/character/video.mp4 structure', () => {
+test('buildPublicDownloadPath uses username/date/character/post-id.mp4 structure', () => {
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
   const sanitizeStart = src.indexOf('  function sanitizeDownloadPathPart(value, fallback = \'unknown\') {');
   const sanitizeEnd = src.indexOf('  function resolvePostedTimestampMs(id) {', sanitizeStart);
@@ -101,9 +101,9 @@ test('buildPublicDownloadPath uses username/date/character/video.mp4 structure',
   vm.runInContext(`${snippet}\nglobalThis.__fn = buildPublicDownloadPath;`, context, {
     filename: 'inject-public-bulk-download-path.harness.js',
   });
-  assert.equal(context.__fn('s_char'), 'alice/2026-03-26/Hero_Prime/video.mp4');
-  assert.equal(context.__fn('s_plain'), 'alice/2026-03-26/video.mp4');
-  assert.equal(context.__fn('s_multi'), 'alice/2026-03-26/Atlas__Hero_Prime__Nova/video.mp4');
+  assert.equal(context.__fn('s_char'), 'alice/2026-03-26/Hero_Prime/s_char.mp4');
+  assert.equal(context.__fn('s_plain'), 'alice/2026-03-26/s_plain.mp4');
+  assert.equal(context.__fn('s_multi'), 'alice/2026-03-26/Atlas__Hero_Prime__Nova/s_multi.mp4');
 });
 
 test('listPublicBulkDownloadCandidates includes indexed posts beyond currently visible cards', () => {

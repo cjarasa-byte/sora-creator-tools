@@ -7767,12 +7767,13 @@ async function renderAnalyzeTable(force = false) {
       seenFolderNames.add(key);
       folderNames.push(sanitized);
     }
+    const videoFilename = `${postId}.mp4`;
     if (folderNames.length > 0) {
       folderNames.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
       const characterFolder = folderNames.join('__');
-      return `${user}/${datePart}/${characterFolder}/video.mp4`;
+      return `${user}/${datePart}/${characterFolder}/${videoFilename}`;
     }
-    return `${user}/${datePart}/video.mp4`;
+    return `${user}/${datePart}/${videoFilename}`;
   }
 
   async function requestBackgroundDownload(url, filename, timeoutMs = 15000) {
