@@ -2149,12 +2149,32 @@ function badgeEmojiFor(id, meta) {
             if (tPost > 0) {
               // __sorauv_getPostTimeStrict returns milliseconds, __sorauv_toTs handles conversion
               const ageMin = Math.max(0, (Date.now() - tPost) / (1000 * 60));
-              idToMeta.set(postId, { ageMin, createdAtMs: tPost });
+              const existingMeta = idToMeta.get(postId) || {};
+              idToMeta.set(postId, {
+                ageMin,
+                createdAtMs: tPost,
+                userHandle: existingMeta.userHandle || null,
+                specialCharacter: post.special_character || existingMeta.specialCharacter || null,
+                cameoUsernames:
+                  (Array.isArray(post.cameo_usernames) && post.cameo_usernames.length > 0
+                    ? post.cameo_usernames
+                    : existingMeta.cameoUsernames) || null,
+              });
             } else if (latest.t) {
               // Fallback: use snapshot time if post_time not available
               // This is less accurate but better than nothing
               const ageMin = Math.max(0, (Date.now() - latest.t) / (1000 * 60));
-              idToMeta.set(postId, { ageMin, createdAtMs: latest.t });
+              const existingMeta = idToMeta.get(postId) || {};
+              idToMeta.set(postId, {
+                ageMin,
+                createdAtMs: latest.t,
+                userHandle: existingMeta.userHandle || null,
+                specialCharacter: post.special_character || existingMeta.specialCharacter || null,
+                cameoUsernames:
+                  (Array.isArray(post.cameo_usernames) && post.cameo_usernames.length > 0
+                    ? post.cameo_usernames
+                    : existingMeta.cameoUsernames) || null,
+              });
             }
           }
           
@@ -6046,7 +6066,18 @@ async function renderAnalyzeTable(force = false) {
 
       if (shouldUpdateMeta) {
         const createdAtMs = __sorauv_toTs(created_at) || existingMeta?.createdAtMs || null;
-        idToMeta.set(id, { ageMin, userHandle, createdAtMs });
+        const resolvedSpecialCharacter = specialCharacter || existingMeta?.specialCharacter || null;
+        const resolvedCameoUsernames =
+          (Array.isArray(cameoUsernames) && cameoUsernames.length > 0
+            ? cameoUsernames
+            : existingMeta?.cameoUsernames) || null;
+        idToMeta.set(id, {
+          ageMin,
+          userHandle,
+          createdAtMs,
+          specialCharacter: resolvedSpecialCharacter,
+          cameoUsernames: resolvedCameoUsernames,
+        });
       }
 
       const userKey = userHandle ? `h:${userHandle.toLowerCase()}` : userId != null ? `id:${userId}` : pageUserKey;
@@ -6179,7 +6210,13 @@ async function renderAnalyzeTable(force = false) {
           const existingRemixMeta = idToMeta.get(remixId);
           if (!existingRemixMeta) {
             const remixCreatedAtMs = __sorauv_toTs(remixCreatedAt) || null;
-            idToMeta.set(remixId, { ageMin: remixAgeMin, userHandle: remixUserHandle, createdAtMs: remixCreatedAtMs });
+            idToMeta.set(remixId, {
+              ageMin: remixAgeMin,
+              userHandle: remixUserHandle,
+              createdAtMs: remixCreatedAtMs,
+              specialCharacter: remixSpecialCharacter || null,
+              cameoUsernames: (Array.isArray(remixCameoUsernames) && remixCameoUsernames.length > 0) ? remixCameoUsernames : null,
+            });
           }
           
           const remixUserKey = remixUserHandle ? `h:${remixUserHandle.toLowerCase()}` : remixUserId != null ? `id:${remixUserId}` : pageUserKey;
@@ -7528,9 +7565,27 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function getPublicDownloadedAssetKeys() {
+    try {
+      const data = JSON.parse(localStorage.getItem(PUBLIC_DOWNLOADS_KEY) || '{}');
+      const assets = Array.isArray(data.assets) ? data.assets : [];
+      return new Set(assets.map((asset) => String(asset || '').trim()).filter(Boolean));
+    } catch {
+      return new Set();
+    }
+  }
+
   function setPublicDownloadedIds(idsSet) {
     try {
-      localStorage.setItem(PUBLIC_DOWNLOADS_KEY, JSON.stringify({ ids: Array.from(idsSet || []) }));
+      const existingAssets = Array.from(getPublicDownloadedAssetKeys());
+      localStorage.setItem(PUBLIC_DOWNLOADS_KEY, JSON.stringify({ ids: Array.from(idsSet || []), assets: existingAssets }));
+    } catch {}
+  }
+
+  function setPublicDownloadedAssetKeys(assetSet) {
+    try {
+      const existingIds = Array.from(getPublicDownloadedIds());
+      localStorage.setItem(PUBLIC_DOWNLOADS_KEY, JSON.stringify({ ids: existingIds, assets: Array.from(assetSet || []) }));
     } catch {}
   }
 
@@ -7619,6 +7674,14 @@ async function renderAnalyzeTable(force = false) {
     setPublicDownloadedIds(downloaded);
   }
 
+  function markPublicAssetDownloaded(assetKey) {
+    const key = String(assetKey || '').trim();
+    if (!key) return;
+    const downloaded = getPublicDownloadedAssetKeys();
+    downloaded.add(key);
+    setPublicDownloadedAssetKeys(downloaded);
+  }
+
   function sanitizeDownloadPathPart(value, fallback = 'unknown') {
     const cleaned = String(value || '')
       .trim()
@@ -7666,6 +7729,17 @@ async function renderAnalyzeTable(force = false) {
     return '';
   }
 
+  function normalizeDownloadAssetKey(url) {
+    const input = String(url || '').trim();
+    if (!input) return '';
+    try {
+      const parsed = new URL(input, location.origin);
+      return `${parsed.origin}${parsed.pathname}`.toLowerCase();
+    } catch {
+      return input.toLowerCase();
+    }
+  }
+
   function buildPublicDownloadPath(postId) {
     const meta = idToMeta.get(postId) || {};
     const user = sanitizeDownloadPathPart(meta.userHandle || 'unknown-user', 'unknown-user');
@@ -7674,7 +7748,31 @@ async function renderAnalyzeTable(force = false) {
       const dt = new Date(meta.createdAtMs);
       datePart = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
     }
-    return `${user}/${datePart}/sora-post-${sanitizeDownloadPathPart(postId, 'unknown')}.mp4`;
+    const folderCandidates = [];
+    if (typeof meta.specialCharacter === 'string' && meta.specialCharacter.trim()) {
+      folderCandidates.push(meta.specialCharacter.trim());
+    }
+    if (Array.isArray(meta.cameoUsernames)) {
+      for (const cameoName of meta.cameoUsernames) {
+        if (typeof cameoName === 'string' && cameoName.trim()) folderCandidates.push(cameoName.trim());
+      }
+    }
+    const seenFolderNames = new Set();
+    const folderNames = [];
+    for (const candidate of folderCandidates) {
+      const sanitized = sanitizeDownloadPathPart(candidate, '');
+      if (!sanitized) continue;
+      const key = sanitized.toLowerCase();
+      if (seenFolderNames.has(key)) continue;
+      seenFolderNames.add(key);
+      folderNames.push(sanitized);
+    }
+    if (folderNames.length > 0) {
+      folderNames.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+      const characterFolder = folderNames.join('__');
+      return `${user}/${datePart}/${characterFolder}/video.mp4`;
+    }
+    return `${user}/${datePart}/video.mp4`;
   }
 
   async function requestBackgroundDownload(url, filename, timeoutMs = 15000) {
@@ -7715,9 +7813,20 @@ async function renderAnalyzeTable(force = false) {
 
   function listPublicBulkDownloadCandidates() {
     const downloadedIds = getPublicDownloadedIds();
+    const downloadedAssetKeys = getPublicDownloadedAssetKeys();
+    const seenAssetKeys = new Set();
     return [...idToPublicDownloadUrl.entries()]
-      .map(([postId, url]) => ({ postId: String(postId || '').trim(), url: String(url || '').trim() }))
-      .filter((row) => row.postId && row.url && !downloadedIds.has(row.postId))
+      .map(([postId, url]) => {
+        const cleanPostId = String(postId || '').trim();
+        const cleanUrl = String(url || '').trim();
+        return { postId: cleanPostId, url: cleanUrl, assetKey: normalizeDownloadAssetKey(cleanUrl) };
+      })
+      .filter((row) => {
+        if (!row.postId || !row.url || !row.assetKey) return false;
+        if (downloadedIds.has(row.postId) || downloadedAssetKeys.has(row.assetKey) || seenAssetKeys.has(row.assetKey)) return false;
+        seenAssetKeys.add(row.assetKey);
+        return true;
+      })
       .sort((a, b) => {
         const tsA = resolvePostedTimestampMs(a.postId) || 0;
         const tsB = resolvePostedTimestampMs(b.postId) || 0;
@@ -7745,6 +7854,7 @@ async function renderAnalyzeTable(force = false) {
         const ok = await requestBackgroundDownload(candidate.url, filename);
         if (!ok) continue;
         markPublicPostDownloaded(candidate.postId);
+        markPublicAssetDownloaded(candidate.assetKey);
       } catch (err) {
         console.error('[SoraUV] Public bulk download failed:', candidate.postId, err);
       }
