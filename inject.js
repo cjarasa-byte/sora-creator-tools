@@ -276,6 +276,7 @@
   let renderPassInFlight = false; // Suppresses observer-triggered renders while processFeedJson is rendering
 
   let gatherScrollIntervalId = null;
+  let gatherScrollRafId = null;
   let gatherRefreshTimeoutId = null;
   let gatherCountdownIntervalId = null;
   let isGatheringActiveThisTab = false;
@@ -5199,23 +5200,76 @@ async function renderAnalyzeTable(force = false) {
       clearTimeout(gatherScrollIntervalId);
       gatherScrollIntervalId = null;
     }
+    if (gatherScrollRafId) {
+      cancelAnimationFrame(gatherScrollRafId);
+      gatherScrollRafId = null;
+    }
     if (gatherRefreshTimeoutId) {
       clearTimeout(gatherRefreshTimeoutId);
       gatherRefreshTimeoutId = null;
     }
 
-    // small, frequent increments for smoothness (~60fps)
-    const TICK_MS = 16; // ~60Hz
-    function startSmoothAutoScroll(pxPerStep) {
-      const step = Math.max(0.25, Number(pxPerStep) || 1); // allow sub-pixel movement
-      function tick() {
-        const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 100;
-        if (!atBottom) {
-          window.scrollTo(0, window.scrollY + step);
+    // Scroll loop tuned for low overhead:
+    // - RAF for smooth motion when actively moving
+    // - throttled layout reads while waiting near the bottom for fresh content
+    const BOTTOM_THRESHOLD = 100;
+    const BOTTOM_RECHECK_MS = 220;
+    const BOTTOM_IDLE_WAIT_MS = 550;
+    function startSmoothAutoScroll(pxPerSecond) {
+      const scrollPxPerSecond = Math.max(16, Number(pxPerSecond) || 60);
+      const scrollingElement = document.scrollingElement || document.documentElement || document.body;
+      let lastTs = null;
+      let lastBottomCheckTs = 0;
+      let lastKnownAtBottom = false;
+      let idleTimeoutArmed = false;
+
+      function stopIdleTimeout() {
+        if (gatherScrollIntervalId) {
+          clearTimeout(gatherScrollIntervalId);
+          gatherScrollIntervalId = null;
         }
-        gatherScrollIntervalId = setTimeout(tick, TICK_MS);
       }
-      tick();
+      function scheduleIdleRetry() {
+        if (idleTimeoutArmed) return;
+        idleTimeoutArmed = true;
+        gatherScrollIntervalId = setTimeout(() => {
+          idleTimeoutArmed = false;
+          gatherScrollIntervalId = null;
+          gatherScrollRafId = requestAnimationFrame(tick);
+        }, BOTTOM_IDLE_WAIT_MS);
+      }
+
+      function tick(ts) {
+        gatherScrollRafId = null;
+        if (!isGatheringActiveThisTab) return;
+        if (lastTs == null) lastTs = ts;
+        const dtMs = Math.max(0, ts - lastTs);
+        lastTs = ts;
+
+        const shouldRecheckBottom = (ts - lastBottomCheckTs) >= BOTTOM_RECHECK_MS;
+        let atBottom = lastKnownAtBottom;
+        if (shouldRecheckBottom) {
+          lastBottomCheckTs = ts;
+          const scrollTop = window.scrollY || scrollingElement.scrollTop || 0;
+          const viewportHeight = window.innerHeight || scrollingElement.clientHeight || 0;
+          const scrollHeight = scrollingElement.scrollHeight || document.body.scrollHeight || 0;
+          atBottom = (viewportHeight + scrollTop) >= (scrollHeight - BOTTOM_THRESHOLD);
+          lastKnownAtBottom = atBottom;
+        }
+
+        if (!atBottom) {
+          stopIdleTimeout();
+          const deltaPx = Math.max(0.25, (scrollPxPerSecond * dtMs) / 1000);
+          window.scrollBy(0, deltaPx);
+          gatherScrollRafId = requestAnimationFrame(tick);
+          return;
+        }
+
+        scheduleIdleRetry();
+      }
+
+      stopIdleTimeout();
+      gatherScrollRafId = requestAnimationFrame(tick);
     }
 
     if (isTopFeed()) {
@@ -5239,7 +5293,8 @@ async function renderAnalyzeTable(force = false) {
         setGatherState(sessionState);
       }
       const speedFactor = Math.max(0.1, TOP_REFRESH_FAST / refreshDelay);
-      startSmoothAutoScroll(TOP_PX_PER_STEP_FAST * speedFactor);
+      const TOP_BASE_PPS_FAST = TOP_PX_PER_STEP_FAST * (1000 / 16);
+      startSmoothAutoScroll(TOP_BASE_PPS_FAST * speedFactor);
       gatherRefreshTimeoutId = setTimeout(() => location.reload(), refreshDelay);
       updateCountdownDisplay();
       return;
@@ -5262,8 +5317,7 @@ async function renderAnalyzeTable(force = false) {
     } else {
       pps = lerp(PPS_MID, PPS_FAST, (t - 0.5) / 0.5);
     }
-    const pxPerStep = (pps * TICK_MS) / 1000; // per-tick movement
-    startSmoothAutoScroll(pxPerStep);
+    startSmoothAutoScroll(pps);
 
     // randomized refresh window (slowest ~1h, fastest ~5m)
     const speedSlow = { rMin: 60 * 60000, rMax: 60 * 60000 };
@@ -5300,6 +5354,10 @@ async function renderAnalyzeTable(force = false) {
     if (gatherScrollIntervalId) {
       clearTimeout(gatherScrollIntervalId);
       gatherScrollIntervalId = null;
+    }
+    if (gatherScrollRafId) {
+      cancelAnimationFrame(gatherScrollRafId);
+      gatherScrollRafId = null;
     }
     if (gatherRefreshTimeoutId) {
       clearTimeout(gatherRefreshTimeoutId);
