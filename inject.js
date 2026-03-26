@@ -5293,13 +5293,59 @@ async function renderAnalyzeTable(force = false) {
     const BOTTOM_THRESHOLD = 140;
     const BOTTOM_RECHECK_MS = 120;
     const BOTTOM_IDLE_WAIT_MS = 220;
+    const BOTTOM_STALL_RECOVERY_MS = 1600;
+    const MAX_DELTA_PX_PER_FRAME = 96;
     function startSmoothAutoScroll(pxPerSecond) {
       const scrollPxPerSecond = Math.max(16, Number(pxPerSecond) || 60);
-      const scrollingElement = document.scrollingElement || document.documentElement || document.body;
+      const docScroller = document.scrollingElement || document.documentElement || document.body;
       let lastTs = null;
       let lastBottomCheckTs = 0;
       let lastKnownAtBottom = false;
       let idleTimeoutArmed = false;
+      let lastScroller = null;
+      let lastScrollHeight = 0;
+      let lastGrowthTs = 0;
+
+      function isScrollableElement(el) {
+        if (!el || el === document.body || el === document.documentElement) return false;
+        const style = getComputedStyle(el);
+        const oy = style?.overflowY || '';
+        if (!/(auto|scroll|overlay)/i.test(oy)) return false;
+        return (el.scrollHeight - el.clientHeight) > 4;
+      }
+
+      function findNearestScrollableAncestor(startEl) {
+        let el = startEl;
+        let hops = 0;
+        while (el && el !== document.body && hops < 16) {
+          if (isScrollableElement(el)) return el;
+          el = el.parentElement;
+          hops++;
+        }
+        return null;
+      }
+
+      function resolveActiveScroller() {
+        // Prefer the nearest scrollable ancestor under viewport center (where feed cards usually live).
+        const centerX = Math.max(0, Math.min(window.innerWidth - 1, Math.round(window.innerWidth * 0.5)));
+        const centerY = Math.max(0, Math.min(window.innerHeight - 1, Math.round(window.innerHeight * 0.6)));
+        const centerNode = document.elementFromPoint(centerX, centerY);
+        const centerScroller = findNearestScrollableAncestor(centerNode);
+        if (centerScroller) return centerScroller;
+
+        // Fallback to common app roots if center hit-testing fails.
+        const roots = [
+          document.querySelector('main'),
+          document.querySelector('[role="main"]'),
+          document.querySelector('#root'),
+          document.body
+        ].filter(Boolean);
+        for (const root of roots) {
+          const scroller = findNearestScrollableAncestor(root);
+          if (scroller) return scroller;
+        }
+        return docScroller;
+      }
 
       function stopIdleTimeout() {
         if (gatherScrollIntervalId) {
@@ -5320,6 +5366,14 @@ async function renderAnalyzeTable(force = false) {
       function tick(ts) {
         gatherScrollRafId = null;
         if (!isGatheringActiveThisTab) return;
+        const scroller = resolveActiveScroller();
+        if (scroller !== lastScroller) {
+          lastScroller = scroller;
+          lastBottomCheckTs = 0;
+          lastKnownAtBottom = false;
+          lastScrollHeight = 0;
+          lastGrowthTs = ts || 0;
+        }
         if (lastTs == null) lastTs = ts;
         const dtMs = Math.max(0, ts - lastTs);
         lastTs = ts;
@@ -5328,17 +5382,52 @@ async function renderAnalyzeTable(force = false) {
         let atBottom = lastKnownAtBottom;
         if (shouldRecheckBottom) {
           lastBottomCheckTs = ts;
-          const scrollTop = window.scrollY || scrollingElement.scrollTop || 0;
-          const viewportHeight = window.innerHeight || scrollingElement.clientHeight || 0;
-          const scrollHeight = scrollingElement.scrollHeight || document.body.scrollHeight || 0;
+          const useWindowScroll = (scroller === docScroller || scroller === document.body || scroller === document.documentElement);
+          const scrollTop = useWindowScroll
+            ? (window.scrollY || window.pageYOffset || docScroller.scrollTop || 0)
+            : (scroller.scrollTop || 0);
+          const viewportHeight = useWindowScroll
+            ? (window.innerHeight || docScroller.clientHeight || 0)
+            : (scroller.clientHeight || 0);
+          const scrollHeight = scroller.scrollHeight || docScroller.scrollHeight || document.body.scrollHeight || 0;
+          if (scrollHeight > lastScrollHeight + 2) {
+            lastScrollHeight = scrollHeight;
+            lastGrowthTs = ts;
+          } else if (!lastScrollHeight) {
+            lastScrollHeight = scrollHeight;
+            lastGrowthTs = ts;
+          }
           atBottom = (viewportHeight + scrollTop) >= (scrollHeight - BOTTOM_THRESHOLD);
           lastKnownAtBottom = atBottom;
         }
 
         if (!atBottom) {
           stopIdleTimeout();
-          const deltaPx = Math.max(0.25, (scrollPxPerSecond * dtMs) / 1000);
-          window.scrollBy(0, deltaPx);
+          // If the page is struggling to paint/load (large RAF gaps), back off speed to reduce thrash.
+          const frameLoadFactor = Math.max(0.35, Math.min(1, 16 / Math.max(16, dtMs)));
+          const rawDelta = (scrollPxPerSecond * dtMs) / 1000;
+          const deltaPx = Math.max(0.25, Math.min(MAX_DELTA_PX_PER_FRAME, rawDelta * frameLoadFactor));
+          const useWindowScroll = (scroller === docScroller || scroller === document.body || scroller === document.documentElement);
+          if (useWindowScroll) {
+            window.scrollBy(0, deltaPx);
+          } else {
+            scroller.scrollTop = (scroller.scrollTop || 0) + deltaPx;
+          }
+          gatherScrollRafId = requestAnimationFrame(tick);
+          return;
+        }
+
+        // If infinite-scroll stalls at bottom for a while, nudge upward once so the next pass can trigger fetch again.
+        if ((ts - lastGrowthTs) >= BOTTOM_STALL_RECOVERY_MS) {
+          const useWindowScroll = (scroller === docScroller || scroller === document.body || scroller === document.documentElement);
+          const nudgeUpPx = 72;
+          if (useWindowScroll) {
+            window.scrollBy(0, -nudgeUpPx);
+          } else {
+            scroller.scrollTop = Math.max(0, (scroller.scrollTop || 0) - nudgeUpPx);
+          }
+          lastGrowthTs = ts;
+          lastKnownAtBottom = false;
           gatherScrollRafId = requestAnimationFrame(tick);
           return;
         }
