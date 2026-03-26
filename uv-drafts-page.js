@@ -4157,23 +4157,60 @@
     return `${username}/${datePath}/${filename}`;
   }
 
+  function requestBackgroundDownload(url, filename) {
+    return new Promise((resolve) => {
+      try {
+        const requestId = `uvd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const origin = location.origin;
+        const onMessage = (ev) => {
+          if (ev?.source !== window) return;
+          if (ev?.origin !== origin) return;
+          const data = ev?.data;
+          if (!data || data.__sora_uv__ !== true || data.type !== 'download_file_response') return;
+          if (data.requestId !== requestId) return;
+          window.removeEventListener('message', onMessage);
+          resolve(data.ok === true);
+        };
+        window.addEventListener('message', onMessage);
+        window.postMessage({
+          __sora_uv__: true,
+          type: 'download_file_request',
+          requestId,
+          url,
+          filename,
+        }, origin);
+        setTimeout(() => {
+          window.removeEventListener('message', onMessage);
+          resolve(false);
+        }, 3000);
+      } catch {
+        resolve(false);
+      }
+    });
+  }
+
   async function downloadDraftToFile(draft, options = {}) {
     const target = resolveDraftDownloadTarget(draft, options);
     if (!target?.url) return { ok: false, reason: 'missing_url' };
     if (options.skipAlreadyDownloaded !== false && draft?.is_downloaded === true) {
       return { ok: false, reason: 'already_downloaded' };
     }
-    const response = await fetch(target.url);
-    if (!response.ok) return { ok: false, reason: `http_${response.status}` };
-    const blob = await response.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    try {
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = buildDraftDownloadPath(draft, { watermark: target.watermark });
-      a.click();
-    } finally {
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+
+    const preferredPath = buildDraftDownloadPath(draft, { watermark: target.watermark });
+    const usedBackgroundDownload = await requestBackgroundDownload(target.url, preferredPath);
+    if (!usedBackgroundDownload) {
+      const response = await fetch(target.url);
+      if (!response.ok) return { ok: false, reason: `http_${response.status}` };
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      try {
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = preferredPath;
+        a.click();
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+      }
     }
 
     draft.is_downloaded = true;
