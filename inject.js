@@ -7665,8 +7665,6 @@ async function renderAnalyzeTable(force = false) {
     let attemptIndex = 0;
     const seenCursors = new Set();
     const MAX_PAGES = 120;
-    const MAX_NO_GROWTH = 4;
-    let noGrowthStreak = 0;
     try {
       for (let page = 0; page < MAX_PAGES; page += 1) {
         const url = usedCursor ? addCursorToUrl(baseUrl, cursor, attemptIndex) : baseUrl;
@@ -7683,9 +7681,8 @@ async function renderAnalyzeTable(force = false) {
         const items = json?.items || json?.data?.items || [];
         totalItems += items.length;
         const afterCount = idToPublicDownloadUrl.size;
-        if (afterCount <= beforeCount) noGrowthStreak += 1;
-        else noGrowthStreak = 0;
-        if (noGrowthStreak >= MAX_NO_GROWTH) break;
+        // Keep paging while the feed provides a new cursor: some pages contain non-video items
+        // or videos without downloadable URLs, so the indexed count may stall temporarily.
 
         const nextCursor = detectFeedNextCursor(json);
         if (!nextCursor || seenCursors.has(nextCursor)) {
