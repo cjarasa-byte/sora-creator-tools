@@ -868,6 +868,19 @@ function startBackgroundDownload(message, sendResponse) {
   return true;
 }
 
+function broadcastPurgeDownloadHistory(sendResponse) {
+  chrome.tabs.query({ url: 'https://sora.chatgpt.com/*' }, (tabs) => {
+    const list = Array.isArray(tabs) ? tabs : [];
+    for (const tab of list) {
+      try { chrome.tabs.sendMessage(tab.id, { action: 'purge_download_history' }); } catch {}
+    }
+    if (typeof sendResponse === 'function') {
+      sendResponse({ ok: true, tabsNotified: list.length });
+    }
+  });
+  return true;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isPlainObject(message) || typeof message.action !== 'string') return false;
   if (!isTrustedSender(sender)) {
@@ -884,6 +897,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'download_file') {
     return startBackgroundDownload(message, sendResponse);
+  }
+
+  if (message.action === 'purge_download_history') {
+    return broadcastPurgeDownloadHistory(sendResponse);
   }
 
   if (message.action === 'metrics_batch') {

@@ -11549,6 +11549,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           await ensureFullSnapshots();
           const { purgedUsers, purgedPosts } = applyPurgeToMetrics(loadedMetrics, purgeOpts);
           await saveMetrics(loadedMetrics, { userKeys: Object.keys(loadedMetrics.users || {}) });
+          try { await chrome.runtime.sendMessage({ action: 'purge_download_history' }); } catch {}
           await updateStorageSizeDisplay();
           if (shouldClearCache) clearTemporaryCaches();
           if (shouldResetPrefs) resetStoredPreferences();
