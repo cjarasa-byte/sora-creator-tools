@@ -7631,21 +7631,17 @@ async function renderAnalyzeTable(force = false) {
   }
 
   async function bulkDownloadPublicPosts() {
-    if (!publicIndexHydrationInFlight && (isTopFeed() || isProfile())) {
-      const shouldHydrate = confirm('Load more public videos first before bulk download?\n\nOK = fetch additional pages now\nCancel = only download videos already loaded on this page');
-      if (shouldHydrate) {
-        try {
-          await hydratePublicVideoIndex();
-        } catch (err) {
-          console.error('[SoraUV] Public index hydration failed:', err);
-        }
-      }
-    }
-
+    // Intentionally scope to cards currently rendered in the DOM.
+    // Users can scroll manually to load more and run bulk download again.
     const downloadedIds = getPublicDownloadedIds();
+    const visibleIds = new Set(
+      selectAllCards()
+        .map((card) => extractIdFromCard(card))
+        .filter(Boolean)
+    );
     const candidates = [...idToPublicDownloadUrl.entries()]
       .map(([postId, url]) => ({ postId: String(postId || '').trim(), url: String(url || '').trim() }))
-      .filter((row) => row.postId && row.url && !downloadedIds.has(row.postId));
+      .filter((row) => row.postId && row.url && visibleIds.has(row.postId) && !downloadedIds.has(row.postId));
     if (!candidates.length) {
       alert('No new downloadable public videos found on this page yet.');
       return;
