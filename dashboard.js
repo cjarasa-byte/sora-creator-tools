@@ -6106,6 +6106,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       const postsHeader = [
         'User Key', 'User Handle', 'User ID', 
         'Post ID', 'Post URL', 'Backend Post URL', 'Post Time', 'Post Time (ISO)', 'Caption',
+        'Special Character',
         'Thumbnail URL', 'Parent Post ID', 'Root Post ID', 'Last Seen Timestamp',
         'Owner Key', 'Owner Handle', 'Owner ID',
         'Latest Snapshot Timestamp', 'Unique Views', 'Total Views', 'Likes', 'Comments', 'Remixes',
@@ -6137,6 +6138,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const lr = likeRate(likes, uv);
           
           const caption = (typeof post.caption === 'string' && post.caption) ? post.caption.replace(/\n/g, ' ').replace(/\r/g, '') : '';
+          const specialCharacter = (typeof post.special_character === 'string' && post.special_character.trim())
+            ? post.special_character.trim()
+            : (Array.isArray(post.cameo_usernames) && post.cameo_usernames.length > 0 ? String(post.cameo_usernames[0] || '') : '');
           const thumb = post.thumb || '';
           const url = post.url || `${SITE_ORIGIN}/p/${pid}`;
           const backendPostUrl = post.backend_post_url || `${SITE_ORIGIN}/backend/project_y/post/${pid}`;
@@ -6155,6 +6159,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           allLines.push([
             userKey, handle, userId,
             pid, url, backendPostUrl, postTime, postTimeISO, caption,
+            specialCharacter,
             thumb, parentPostId, rootPostId, lastSeen,
             ownerKey, ownerHandle, ownerId,
             latestTime, uv, views, likes, comments, remixes,
@@ -6169,7 +6174,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       allLines.push('=== POST SNAPSHOTS (Complete Historical Timeline) ===');
       const snapshotsHeader = [
         'User Key', 'User Handle', 'User ID',
-        'Post ID', 'Post URL', 'Backend Post URL', 'Post Caption', 'Post Time',
+        'Post ID', 'Post URL', 'Backend Post URL', 'Post Caption', 'Special Character', 'Post Time',
         'Owner Key', 'Owner Handle', 'Owner ID',
         'Snapshot Timestamp', 'Snapshot Timestamp (ISO)', 'Snapshot Age (minutes)',
         'Unique Views', 'Total Views', 'Likes', 'Comments', 'Remixes',
@@ -6187,6 +6192,9 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           const postTimeRaw = getPostTimeStrict(post);
           const postTime = fmtTimestamp(postTimeRaw);
           const caption = (typeof post.caption === 'string' && post.caption) ? post.caption.replace(/\n/g, ' ').replace(/\r/g, '') : '';
+          const specialCharacter = (typeof post.special_character === 'string' && post.special_character.trim())
+            ? post.special_character.trim()
+            : (Array.isArray(post.cameo_usernames) && post.cameo_usernames.length > 0 ? String(post.cameo_usernames[0] || '') : '');
           const url = post.url || `${SITE_ORIGIN}/p/${pid}`;
           const backendPostUrl = post.backend_post_url || `${SITE_ORIGIN}/backend/project_y/post/${pid}`;
           const ownerKey = post.ownerKey || userKey;
@@ -6218,7 +6226,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             
             allLines.push([
               userKey, handle, userId,
-              pid, url, backendPostUrl, caption, postTime,
+              pid, url, backendPostUrl, caption, specialCharacter, postTime,
               ownerKey, ownerHandle, ownerId,
               tFormatted, tISO, ageMin,
               uv, views, likes, comments, remixes,

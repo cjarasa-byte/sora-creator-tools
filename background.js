@@ -125,6 +125,8 @@ function sanitizeMetricsSnapshot(raw) {
   if (thumb) snap.thumb = thumb;
   const caption = sanitizeString(raw.caption, 4096);
   if (caption) snap.caption = caption;
+  const specialCharacter = sanitizeString(raw.special_character, 256);
+  if (specialCharacter) snap.special_character = specialCharacter;
 
   const cameoUsernames = sanitizeCameoUsernames(raw.cameo_usernames);
   if (cameoUsernames) snap.cameo_usernames = cameoUsernames;
@@ -390,6 +392,7 @@ function trimPostForResponse(post, snapshotMode) {
     width: post.width ?? null,
     height: post.height ?? null,
     cameo_usernames: post.cameo_usernames ?? null,
+    special_character: post.special_character ?? null,
     snapshots,
   };
 }
@@ -561,6 +564,12 @@ async function flush() {
             } else if (!post.cameo_usernames) {
               // Only set to null/empty if it wasn't already set (preserve existing data)
               post.cameo_usernames = null;
+            }
+          }
+          // Capture/refresh special character
+          if (typeof snap.special_character === 'string' && snap.special_character) {
+            if (!post.special_character || post.special_character !== snap.special_character) {
+              post.special_character = snap.special_character; dirty = true;
             }
           }
           // Update thumbnail when a better/different one becomes available
