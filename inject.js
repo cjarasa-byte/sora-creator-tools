@@ -7713,18 +7713,23 @@ async function renderAnalyzeTable(force = false) {
     });
   }
 
-  async function bulkDownloadPublicPosts() {
-    // Intentionally scope to cards currently rendered in the DOM.
-    // Users can scroll manually to load more and run bulk download again.
+  function listPublicBulkDownloadCandidates() {
     const downloadedIds = getPublicDownloadedIds();
-    const visibleIds = new Set(
-      selectAllCards()
-        .map((card) => extractIdFromCard(card))
-        .filter(Boolean)
-    );
-    const candidates = [...idToPublicDownloadUrl.entries()]
+    return [...idToPublicDownloadUrl.entries()]
       .map(([postId, url]) => ({ postId: String(postId || '').trim(), url: String(url || '').trim() }))
-      .filter((row) => row.postId && row.url && visibleIds.has(row.postId) && !downloadedIds.has(row.postId));
+      .filter((row) => row.postId && row.url && !downloadedIds.has(row.postId))
+      .sort((a, b) => {
+        const tsA = resolvePostedTimestampMs(a.postId) || 0;
+        const tsB = resolvePostedTimestampMs(b.postId) || 0;
+        if (tsA !== tsB) return tsA - tsB;
+        return a.postId.localeCompare(b.postId);
+      });
+  }
+
+  async function bulkDownloadPublicPosts() {
+    // Download every post we've indexed from the paginated public feed fetches.
+    // This supports large profile/explore sessions where users scroll through 1k+ videos.
+    const candidates = listPublicBulkDownloadCandidates();
     if (!candidates.length) {
       alert('No new downloadable public videos found on this page yet.');
       return;
