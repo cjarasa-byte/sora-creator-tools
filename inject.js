@@ -7630,6 +7630,42 @@ async function renderAnalyzeTable(force = false) {
     return `${user}/${datePart}/sora-post-${sanitizeDownloadPathPart(postId, 'unknown')}.mp4`;
   }
 
+  async function requestBackgroundDownload(url, filename, timeoutMs = 15000) {
+    const safeUrl = typeof url === 'string' ? url.trim() : '';
+    const safeFilename = typeof filename === 'string' ? filename.trim() : '';
+    if (!safeUrl || !safeFilename) return false;
+    const requestId = `dl_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    return await new Promise((resolve) => {
+      let settled = false;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        try { window.removeEventListener('message', onMessage); } catch {}
+        resolve(ok === true);
+      };
+      const onMessage = (ev) => {
+        const d = ev?.data;
+        if (!d || d.__sora_uv__ !== true || d.type !== 'download_file_response') return;
+        if (d.requestId !== requestId) return;
+        done(d.ok === true);
+      };
+      try { window.addEventListener('message', onMessage); } catch {}
+      try {
+        window.postMessage({
+          __sora_uv__: true,
+          type: 'download_file_request',
+          requestId,
+          url: safeUrl,
+          filename: safeFilename,
+        }, '*');
+      } catch {
+        done(false);
+        return;
+      }
+      setTimeout(() => done(false), timeoutMs);
+    });
+  }
+
   async function bulkDownloadPublicPosts() {
     // Intentionally scope to cards currently rendered in the DOM.
     // Users can scroll manually to load more and run bulk download again.
@@ -7653,15 +7689,9 @@ async function renderAnalyzeTable(force = false) {
     if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
     for (const candidate of candidates) {
       try {
-        const response = await fetch(candidate.url);
-        if (!response.ok) continue;
-        const blob = await response.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        a.download = buildPublicDownloadPath(candidate.postId);
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+        const filename = buildPublicDownloadPath(candidate.postId);
+        const ok = await requestBackgroundDownload(candidate.url, filename);
+        if (!ok) continue;
         markPublicPostDownloaded(candidate.postId);
       } catch (err) {
         console.error('[SoraUV] Public bulk download failed:', candidate.postId, err);
