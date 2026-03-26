@@ -753,11 +753,25 @@
     } catch {}
     return null;
   }
-  const extractIdFromCard = (el) => {
-    const link = el.querySelector('a[href^="/p/s_"]');
-    if (!link) return null;
-    const m = link.getAttribute('href').match(/\/p\/(s_[A-Za-z0-9]+)/i);
+  function extractPostIdFromHref(href) {
+    const raw = typeof href === 'string' ? href.trim() : '';
+    if (!raw) return null;
+    const m = raw.match(/(?:^|https?:\/\/[^/]+)\/p\/([A-Za-z0-9_-]+)/i);
     return m ? normalizeId(m[1]) : null;
+  }
+  const extractIdFromCard = (el) => {
+    const links = Array.from(el.querySelectorAll('a[href*="/p/"]'));
+    for (const link of links) {
+      const id = extractPostIdFromHref(link.getAttribute('href'));
+      if (id) return id;
+    }
+    const fromAttr =
+      el?.dataset?.postId ||
+      el?.getAttribute?.('data-post-id') ||
+      el?.getAttribute?.('data-item-id') ||
+      null;
+    if (typeof fromAttr === 'string' && fromAttr.trim()) return normalizeId(fromAttr);
+    return null;
   };
   function isBadCardContainer(el) {
     try {
@@ -799,7 +813,7 @@
   }
 
   const selectAllCards = () =>
-    Array.from(document.querySelectorAll('a[href^="/p/s_"]'))
+    Array.from(document.querySelectorAll('a[href*="/p/"]'))
       .filter((a) => {
         // Exclude posts inside Leaderboard dialog/popover
         const inDialog = a.closest('[role="dialog"]');
@@ -7575,6 +7589,14 @@ async function renderAnalyzeTable(force = false) {
     if (ev?.source !== window) return;
     const d = ev?.data;
     if (!d || d.__sora_uv__ !== true || d.type !== 'purge_download_history') return;
+    const nonce = Number(d.nonce);
+    if (Number.isFinite(nonce) && nonce > 0) {
+      try {
+        const seen = Number(localStorage.getItem('SORA_UV_PURGE_DOWNLOAD_HISTORY_NONCE') || '0');
+        if (seen >= nonce) return;
+        localStorage.setItem('SORA_UV_PURGE_DOWNLOAD_HISTORY_NONCE', String(nonce));
+      } catch {}
+    }
     purgeClientDownloadHistory();
   });
 
@@ -7613,7 +7635,15 @@ async function renderAnalyzeTable(force = false) {
     }
     const attachments = Array.isArray(p?.attachments) ? p.attachments : [];
     for (const attachment of attachments) {
-      const candidate = attachment?.downloadable_url || attachment?.url || attachment?.src || attachment?.path;
+      const candidate =
+        attachment?.downloadable_url ||
+        attachment?.download_urls?.no_watermark ||
+        attachment?.download_urls?.watermark ||
+        attachment?.encodings?.source?.path ||
+        attachment?.encodings?.source_wm?.path ||
+        attachment?.url ||
+        attachment?.src ||
+        attachment?.path;
       if (typeof candidate === 'string' && /^https?:\/\//i.test(candidate)) return candidate;
     }
     return '';

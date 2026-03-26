@@ -206,7 +206,19 @@
     } catch {}
   }
 
+  async function syncPurgeDownloadHistoryNonce() {
+    try {
+      const stored = await chrome.storage.local.get('purgeDownloadHistoryNonce');
+      const nonce = Number(stored?.purgeDownloadHistoryNonce);
+      if (!Number.isFinite(nonce) || nonce <= 0) return;
+      try {
+        window.postMessage({ __sora_uv__: true, type: 'purge_download_history', nonce }, PAGE_ORIGIN);
+      } catch {}
+    } catch {}
+  }
+
   syncUltraModePreference();
+  syncPurgeDownloadHistoryNonce();
   // Listen for ultra mode changes broadcast from background (avoids chrome.storage.onChanged
   // which would serialize the full metrics blob to every content script on every flush).
   try {
@@ -214,7 +226,8 @@
       if (message?.action === 'ultra_mode_changed') syncUltraModePreference();
       if (message?.action === 'purge_download_history') {
         try {
-          window.postMessage({ __sora_uv__: true, type: 'purge_download_history' }, PAGE_ORIGIN);
+          const nonce = Number(message?.nonce);
+          window.postMessage({ __sora_uv__: true, type: 'purge_download_history', nonce: Number.isFinite(nonce) ? nonce : undefined }, PAGE_ORIGIN);
         } catch {}
       }
     });

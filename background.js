@@ -869,13 +869,15 @@ function startBackgroundDownload(message, sendResponse) {
 }
 
 function broadcastPurgeDownloadHistory(sendResponse) {
+  const nonce = Date.now();
+  try { chrome.storage.local.set({ purgeDownloadHistoryNonce: nonce }); } catch {}
   chrome.tabs.query({ url: 'https://sora.chatgpt.com/*' }, (tabs) => {
     const list = Array.isArray(tabs) ? tabs : [];
     for (const tab of list) {
-      try { chrome.tabs.sendMessage(tab.id, { action: 'purge_download_history' }); } catch {}
+      try { chrome.tabs.sendMessage(tab.id, { action: 'purge_download_history', nonce }); } catch {}
     }
     if (typeof sendResponse === 'function') {
-      sendResponse({ ok: true, tabsNotified: list.length });
+      sendResponse({ ok: true, tabsNotified: list.length, nonce });
     }
   });
   return true;
