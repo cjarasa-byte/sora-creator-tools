@@ -37,6 +37,18 @@ Run:
 node sora-dl.js batch --input ./urls.txt --dir ./downloads --concurrency 3
 ```
 
+### Download everything discoverable from a profile/user page
+
+```bash
+node sora-dl.js profile \
+  --url "https://sora.chatgpt.com/explore/creator/some-user" \
+  --dir ./downloads \
+  --concurrency 3
+```
+
+By default, profile mode downloads only media-like links (for example `.mp4`, `.webm`, image formats, and similar asset URLs) discovered in the page HTML.
+Use `--all-links` to attempt downloading every discovered link.
+
 ### Mark completed downloads (dedupe)
 
 A state file is written to `.state/downloaded.json` so repeated runs skip completed URLs.

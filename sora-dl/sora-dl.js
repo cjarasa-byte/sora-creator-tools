@@ -20,10 +20,12 @@ Usage:
   sora-dl --help
   sora-dl download --url <url> --out <path> [--allow-any-host]
   sora-dl batch --input <urls.txt> --dir <download_dir> [--concurrency <n>] [--allow-any-host]
+  sora-dl profile --url <profile_url> --dir <download_dir> [--concurrency <n>] [--allow-any-host] [--all-links]
 
 Options:
   --allow-any-host   Disable host allowlist checks
   --concurrency <n>  Number of parallel downloads for batch (default: 3)
+  --all-links        For profile mode, download all discovered links (not just media-like URLs)
 `);
 }
 
@@ -181,6 +183,120 @@ async function runBatch(options) {
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#'));
 
+  await downloadManyUrls(urls, dir, { concurrency, allowAnyHost });
+}
+
+function looksLikeMediaAsset(rawUrl) {
+  const mediaExts = new Set([
+    '.mp4',
+    '.webm',
+    '.mov',
+    '.m4v',
+    '.mkv',
+    '.jpg',
+    '.jpeg',
+    '.png',
+    '.gif',
+    '.webp',
+    '.mp3',
+    '.wav',
+    '.json',
+  ]);
+  try {
+    const u = new URL(rawUrl);
+    const pathname = u.pathname.toLowerCase();
+    for (const ext of mediaExts) {
+      if (pathname.endsWith(ext)) return true;
+    }
+    if (/[?&](format|ext|type)=(mp4|webm|mov|m4v|jpg|jpeg|png|gif|webp|mp3|wav)\b/i.test(u.search)) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function extractUrlsFromProfileText(text, baseUrl) {
+  const found = new Set();
+  const absoluteUrlPattern = /https?:\/\/[^\s"'<>`]+/g;
+  const srcHrefPattern = /(?:src|href)=["']([^"']+)["']/gi;
+  const jsonPathPattern = /"(\/[^"\\]+\.(?:mp4|webm|mov|m4v|mkv|jpg|jpeg|png|gif|webp|mp3|wav|json)(?:\?[^"\\]*)?)"/gi;
+
+  for (const match of text.matchAll(absoluteUrlPattern)) {
+    found.add(match[0]);
+  }
+
+  for (const match of text.matchAll(srcHrefPattern)) {
+    try {
+      found.add(new URL(match[1], baseUrl).toString());
+    } catch {
+      // ignore malformed links
+    }
+  }
+
+  for (const match of text.matchAll(jsonPathPattern)) {
+    try {
+      found.add(new URL(match[1], baseUrl).toString());
+    } catch {
+      // ignore malformed paths
+    }
+  }
+
+  return Array.from(found);
+}
+
+function fetchText(rawUrl, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      reject(new Error(`Invalid URL: ${rawUrl}`));
+      return;
+    }
+
+    const client = parsed.protocol === 'https:' ? https : parsed.protocol === 'http:' ? http : null;
+    if (!client) {
+      reject(new Error(`Unsupported protocol: ${parsed.protocol}`));
+      return;
+    }
+
+    const req = client.get(parsed, (res) => {
+      const status = Number(res.statusCode || 0);
+      if ([301, 302, 303, 307, 308].includes(status)) {
+        const location = res.headers.location;
+        if (!location) {
+          reject(new Error(`Redirect without location: ${rawUrl}`));
+          return;
+        }
+        if (redirectCount >= MAX_REDIRECTS) {
+          reject(new Error(`Too many redirects for: ${rawUrl}`));
+          return;
+        }
+        const nextUrl = new URL(location, rawUrl).toString();
+        resolve(fetchText(nextUrl, redirectCount + 1));
+        return;
+      }
+
+      if (status < 200 || status >= 300) {
+        reject(new Error(`HTTP ${status} for ${rawUrl}`));
+        return;
+      }
+
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      res.on('error', (err) => reject(err));
+    });
+
+    req.on('error', (err) => reject(err));
+  });
+}
+
+async function downloadManyUrls(urls, dir, { concurrency, allowAnyHost }) {
+  const cleanUrls = urls.filter(Boolean);
+
   await ensureDir(dir);
   const stateDir = path.join(dir, DEFAULT_STATE_DIR);
   await ensureDir(stateDir);
@@ -190,7 +306,7 @@ async function runBatch(options) {
   let ok = 0;
   let skipped = 0;
   let failed = 0;
-  const queue = [...urls];
+  const queue = [...cleanUrls];
 
   async function worker() {
     while (queue.length > 0) {
@@ -224,6 +340,30 @@ async function runBatch(options) {
   if (failed > 0) process.exitCode = 1;
 }
 
+async function runProfile(options) {
+  const profileUrl = String(options.url || '').trim();
+  const dir = String(options.dir || '').trim();
+  const allowAnyHost = options['allow-any-host'] === true;
+  const allLinks = options['all-links'] === true;
+  const concurrency = Math.max(1, Number.parseInt(String(options.concurrency || '3'), 10) || 3);
+
+  if (!profileUrl || !dir) {
+    throw new Error('profile requires --url and --dir');
+  }
+
+  ensureAllowedHost(profileUrl, allowAnyHost);
+  const body = await fetchText(profileUrl);
+  const discovered = extractUrlsFromProfileText(body, profileUrl);
+  const urls = allLinks ? discovered : discovered.filter((rawUrl) => looksLikeMediaAsset(rawUrl));
+
+  if (urls.length === 0) {
+    throw new Error('No downloadable links were found on that profile page. Try --all-links to inspect everything.');
+  }
+
+  console.log(`Discovered ${discovered.length} links; downloading ${urls.length}.`);
+  await downloadManyUrls(urls, dir, { concurrency, allowAnyHost });
+}
+
 (async function main() {
   const argv = process.argv.slice(2);
   if (!argv.length || argv[0] === '--help' || argv[0] === '-h') {
@@ -240,6 +380,10 @@ async function runBatch(options) {
     }
     if (command === 'batch') {
       await runBatch(options);
+      return;
+    }
+    if (command === 'profile') {
+      await runProfile(options);
       return;
     }
     throw new Error(`Unknown command: ${command}`);
