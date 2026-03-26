@@ -119,6 +119,8 @@ function sanitizeMetricsSnapshot(raw) {
 
   const url = sanitizeString(raw.url, 2048);
   if (url) snap.url = url;
+  const backendPostUrl = sanitizeString(raw.backend_post_url, 2048);
+  if (backendPostUrl) snap.backend_post_url = backendPostUrl;
   const thumb = sanitizeString(raw.thumb, 2048);
   if (thumb) snap.thumb = thumb;
   const caption = sanitizeString(raw.caption, 4096);
@@ -374,6 +376,7 @@ function trimPostForResponse(post, snapshotMode) {
   }
   return {
     url: post.url ?? null,
+    backend_post_url: post.backend_post_url ?? null,
     thumb: post.thumb ?? null,
     caption: typeof post.caption === 'string' ? post.caption : null,
     text: typeof post.text === 'string' ? post.text : null,
@@ -545,6 +548,7 @@ async function flush() {
           if (!post.ownerHandle && (snap.userHandle || snap.pageUserHandle)) { post.ownerHandle = snap.userHandle || snap.pageUserHandle; dirty = true; }
           if (!post.ownerId && snap.userId != null) { post.ownerId = snap.userId; dirty = true; }
           if (!post.url && snap.url) { post.url = snap.url; dirty = true; }
+          if (!post.backend_post_url && snap.backend_post_url) { post.backend_post_url = snap.backend_post_url; dirty = true; }
           // Capture/refresh caption
           if (typeof snap.caption === 'string' && snap.caption) {
             if (!post.caption) { post.caption = snap.caption; dirty = true; }

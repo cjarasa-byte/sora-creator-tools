@@ -5954,6 +5954,7 @@ async function renderAnalyzeTable(force = false) {
       updateMetric(idToRemixes, rx);
 
       const absUrl = `${location.origin}/p/${id}`;
+      const backendPostUrl = `${location.origin}/backend/project_y/post/${id}`;
       const owner = getOwner(it);
       const userHandle = owner.handle || pageUserHandle || null;
       const userId = owner.id || null;
@@ -6010,6 +6011,7 @@ async function renderAnalyzeTable(force = false) {
         ageMin,
         thumb: th,
         url: absUrl,
+        backend_post_url: backendPostUrl,
         ts: Date.now(),
         userHandle,
         userId,
@@ -6105,6 +6107,7 @@ async function renderAnalyzeTable(force = false) {
           updateRemixMetric(idToRemixes, remixRx);
           
           const remixAbsUrl = `${location.origin}/p/${remixId}`;
+          const remixBackendPostUrl = `${location.origin}/backend/project_y/post/${remixId}`;
           const remixOwner = getOwner(remixItem);
           const remixUserHandle = remixOwner.handle || pageUserHandle || null;
           const remixUserId = remixOwner.id || null;
@@ -6138,6 +6141,7 @@ async function renderAnalyzeTable(force = false) {
             ageMin: remixAgeMin,
             thumb: remixTh,
             url: remixAbsUrl,
+            backend_post_url: remixBackendPostUrl,
             ts: Date.now(),
             userHandle: remixUserHandle,
             userId: remixUserId,
