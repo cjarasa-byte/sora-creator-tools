@@ -211,6 +211,7 @@
         .map((draft) => String(draft?.id || '').trim())
         .filter(Boolean)
     );
+
     return {
       droppedIds,
       endpointIds: nextEndpointIds,
@@ -1220,6 +1221,7 @@
     const VIDEO_GENS_BALANCE_EVENT = 'sct_video_gens_balance';
     const UV_DRAFTS_GENS_COUNT_KEY = 'SORA_UV_DRAFTS_GENS_COUNT_V1';
     const UV_DRAFTS_COMPOSER_PROMPT_KEY = 'SORA_UV_DRAFTS_PROMPT_V1';
+    const UV_DRAFTS_DOWNLOAD_PREFS_KEY = 'SORA_UV_DRAFTS_DOWNLOAD_PREFS_V1';
     const ULTRA_MODE_KEY = 'SCT_ULTRA_MODE_V1';
     const GENS_COUNT_MIN = 1;
     const GENS_COUNT_MAX_DEFAULT = 10;
@@ -1596,7 +1598,7 @@
       return /(?:^|\s)bookmarked\s*:/i.test(String(query || ''));
     }
   const UV_DRAFTS_DB_NAME = 'SORA_UV_DRAFTS_CACHE';
-  const UV_DRAFTS_DB_VERSION = 1;
+  const UV_DRAFTS_DB_VERSION = 2;
   const UV_DRAFTS_STORES = {
     drafts: 'drafts',
     thumbnails: 'thumbnails',
@@ -1628,6 +1630,16 @@
           draftsStore.createIndex('bookmarked', 'bookmarked', { unique: false });
           draftsStore.createIndex('hidden', 'hidden', { unique: false });
           draftsStore.createIndex('workspace_id', 'workspace_id', { unique: false });
+          draftsStore.createIndex('is_downloaded', 'is_downloaded', { unique: false });
+          draftsStore.createIndex('downloaded_at', 'downloaded_at', { unique: false });
+        } else if (event.oldVersion < 2) {
+          const draftsStore = event.target.transaction.objectStore(UV_DRAFTS_STORES.drafts);
+          if (!draftsStore.indexNames.contains('is_downloaded')) {
+            draftsStore.createIndex('is_downloaded', 'is_downloaded', { unique: false });
+          }
+          if (!draftsStore.indexNames.contains('downloaded_at')) {
+            draftsStore.createIndex('downloaded_at', 'downloaded_at', { unique: false });
+          }
         }
 
         // Thumbnails store - cached thumbnail blobs
@@ -2038,6 +2050,10 @@
       }
     }
 
+    const downloadUrlNoWm = apiDraft.download_urls?.no_watermark || apiDraft.downloadable_url || existingData.download_url_no_watermark || '';
+    const downloadUrlWm = apiDraft.download_urls?.watermark || existingData.download_url_watermark || '';
+    const resolvedDownloadUrl = downloadUrlNoWm || downloadUrlWm || apiDraft.video_url || apiDraft.url || existingData.download_url || '';
+
     return {
       id: apiDraft.id || apiDraft.generation_id,
       kind,
@@ -2052,7 +2068,9 @@
       thumbnail_url: thumbnailUrl,
       preview_url: previewUrl,
       gif_url: apiDraft.encodings?.gif?.path || '',
-      download_url: apiDraft.downloadable_url || apiDraft.download_urls?.no_watermark || apiDraft.video_url || apiDraft.url || existingData.download_url || '',
+      download_url: resolvedDownloadUrl,
+      download_url_no_watermark: downloadUrlNoWm,
+      download_url_watermark: downloadUrlWm,
       can_remix: apiDraft.can_remix ?? true,
       can_storyboard: apiDraft.can_storyboard ?? true,
       storyboard_id: apiDraft.storyboard_id || apiDraft.creation_config?.storyboard_id || '',
@@ -2085,6 +2103,8 @@
       scheduled_post_at: Number(existingData.scheduled_post_at) > 0 ? Number(existingData.scheduled_post_at) : null,
       scheduled_post_status: existingData.scheduled_post_status || null,
       scheduled_post_caption: typeof existingData.scheduled_post_caption === 'string' ? existingData.scheduled_post_caption : '',
+      is_downloaded: existingData.is_downloaded === true,
+      downloaded_at: Number(existingData.downloaded_at) > 0 ? Number(existingData.downloaded_at) : null,
       is_unsynced: fromDraftsApi ? false : existingData?.is_unsynced === true,
       cached_at: Date.now(),
       last_fetched: Date.now()
@@ -2219,7 +2239,7 @@
   let uvDraftsFilterBarEl = null;
   let uvDraftsLoadingEl = null;
   let uvDraftsSearchInput = null;
-  let uvDraftsFilterState = 'all'; // 'all', 'bookmarked', 'hidden', 'violations', 'new', 'unsynced'
+  let uvDraftsFilterState = 'all'; // 'all', 'bookmarked', 'hidden', 'violations', 'new', 'unsynced', 'downloaded'
   let uvDraftsWorkspaceFilter = null; // workspace_id or null
   let uvDraftsSearchQuery = '';
   let uvDraftsData = []; // Current loaded drafts
@@ -2243,6 +2263,11 @@
   let uvDraftsSyncButtonEl = null;
   let uvDraftsMarkAllButtonEl = null;
   let uvDraftsMarkAllStatusEl = null;
+  let uvDraftsBulkDownloadBtnEl = null;
+  let uvDraftsBulkDownloadStatusEl = null;
+  let uvDraftsDownloadPrefs = loadDownloadPrefs();
+  let uvDraftsBulkDownloadRunning = false;
+  let uvDraftsAutoBulkArmed = false;
   let uvDraftsMarkAllProgressTimerId = null;
   const UV_DRAFTS_SYNC_PROGRESS_KEY = 'SORA_UV_DRAFTS_SYNC_PROGRESS_V1';
   const UV_DRAFTS_MARK_ALL_PROGRESS_KEY = 'SORA_UV_DRAFTS_MARK_ALL_PROGRESS_V1';
@@ -2558,8 +2583,38 @@
   }
 
   const UV_DRAFTS_VIEW_STATE_KEY = 'SORA_UV_DRAFTS_VIEW_STATE_V1';
-  const UV_DRAFTS_FILTER_VALUES = new Set(['all', 'bookmarked', 'hidden', 'violations', 'new', 'unsynced']);
+  const UV_DRAFTS_FILTER_VALUES = new Set(['all', 'bookmarked', 'hidden', 'violations', 'new', 'unsynced', 'downloaded']);
   let uvDraftsViewStateLoaded = false;
+
+  function normalizeDownloadPrefs(raw) {
+    const out = {
+      preferNoWatermark: true,
+      allowWatermarkFallback: true,
+      skipAlreadyDownloaded: true,
+      autoBulkAfterSync: false,
+    };
+    if (!raw || typeof raw !== 'object') return out;
+    if (typeof raw.preferNoWatermark === 'boolean') out.preferNoWatermark = raw.preferNoWatermark;
+    if (typeof raw.allowWatermarkFallback === 'boolean') out.allowWatermarkFallback = raw.allowWatermarkFallback;
+    if (typeof raw.skipAlreadyDownloaded === 'boolean') out.skipAlreadyDownloaded = raw.skipAlreadyDownloaded;
+    if (typeof raw.autoBulkAfterSync === 'boolean') out.autoBulkAfterSync = raw.autoBulkAfterSync;
+    return out;
+  }
+
+  function loadDownloadPrefs() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(UV_DRAFTS_DOWNLOAD_PREFS_KEY) || '{}');
+      return normalizeDownloadPrefs(raw);
+    } catch {
+      return normalizeDownloadPrefs(null);
+    }
+  }
+
+  function persistDownloadPrefs() {
+    try {
+      localStorage.setItem(UV_DRAFTS_DOWNLOAD_PREFS_KEY, JSON.stringify(uvDraftsDownloadPrefs));
+    } catch {}
+  }
 
   function normalizeUVDraftsViewState(raw) {
     if (uvDraftsLogic && typeof uvDraftsLogic.normalizeViewState === 'function') {
@@ -4051,6 +4106,82 @@
     await uvDBPut(UV_DRAFTS_STORES.drafts, draft);
   }
 
+  function sanitizePathPart(value, fallback = 'unknown') {
+    const cleaned = String(value || '')
+      .trim()
+      .replace(/[\\/:*?"<>|]/g, '-')
+      .replace(/\s+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return cleaned || fallback;
+  }
+
+  function getDownloadRootUsername() {
+    try {
+      const profileMatch = String(location?.pathname || '').match(/^\/profile\/(?:username\/)?([^/?#]+)/i);
+      if (profileMatch && profileMatch[1]) return sanitizePathPart(decodeURIComponent(profileMatch[1]), 'unknown-user');
+    } catch {}
+    return 'unknown-user';
+  }
+
+  function formatDraftDatePathPart(draft) {
+    const createdAt = Number(draft?.created_at);
+    if (!Number.isFinite(createdAt) || createdAt <= 0) return 'unknown-date';
+    const date = new Date(createdAt * 1000);
+    const yyyy = date.getUTCFullYear();
+    const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(date.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  function resolveDraftDownloadTarget(draft, options = {}) {
+    if (!draft || typeof draft !== 'object') return null;
+    const preferNoWatermark = options.preferNoWatermark !== false;
+    const allowWatermarkFallback = options.allowWatermarkFallback !== false;
+    const noWatermarkUrl = String(draft.download_url_no_watermark || draft.download_url || '').trim();
+    const watermarkUrl = String(draft.download_url_watermark || '').trim();
+    const genericUrl = String(draft.download_url || draft.preview_url || '').trim();
+
+    if (preferNoWatermark && noWatermarkUrl) return { url: noWatermarkUrl, watermark: false };
+    if (allowWatermarkFallback && watermarkUrl) return { url: watermarkUrl, watermark: true };
+    if (!preferNoWatermark && watermarkUrl) return { url: watermarkUrl, watermark: true };
+    if (genericUrl) return { url: genericUrl, watermark: false };
+    return null;
+  }
+
+  function buildDraftDownloadPath(draft, options = {}) {
+    const username = sanitizePathPart(options.username || getDownloadRootUsername(), 'unknown-user');
+    const datePath = sanitizePathPart(formatDraftDatePathPart(draft), 'unknown-date');
+    const suffix = options.watermark === true ? '-wm' : '';
+    const filename = `sora-draft-${sanitizePathPart(draft?.id || 'unknown')}${suffix}.mp4`;
+    return `${username}/${datePath}/${filename}`;
+  }
+
+  async function downloadDraftToFile(draft, options = {}) {
+    const target = resolveDraftDownloadTarget(draft, options);
+    if (!target?.url) return { ok: false, reason: 'missing_url' };
+    if (options.skipAlreadyDownloaded !== false && draft?.is_downloaded === true) {
+      return { ok: false, reason: 'already_downloaded' };
+    }
+    const response = await fetch(target.url);
+    if (!response.ok) return { ok: false, reason: `http_${response.status}` };
+    const blob = await response.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    try {
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = buildDraftDownloadPath(draft, { watermark: target.watermark });
+      a.click();
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    }
+
+    draft.is_downloaded = true;
+    draft.downloaded_at = Date.now();
+    await persistDraftRecord(draft);
+    return { ok: true, watermark: target.watermark === true };
+  }
+
   async function setDraftScheduledState(draft, scheduledPost = null) {
     if (!draft || typeof draft !== 'object') return;
     if (scheduledPost && typeof scheduledPost === 'object') {
@@ -5215,6 +5346,8 @@
       filtered = filtered.filter((d) => d.hidden);
     } else if (uvDraftsFilterState === 'unsynced') {
       filtered = filtered.filter((d) => d?.is_unsynced === true);
+    } else if (uvDraftsFilterState === 'downloaded') {
+      filtered = filtered.filter((d) => d?.is_downloaded === true);
     } else if (uvDraftsFilterState === 'violations') {
       filtered = filtered.filter((d) => isContentViolationDraft(d) || isContextViolationDraft(d));
     } else if (uvDraftsFilterState === 'new') {
@@ -5725,6 +5858,9 @@
     } else if (isContentViolation || isContextViolation) {
       metaParts.push('Policy blocked');
     }
+    if (draft?.is_downloaded === true) {
+      metaParts.push('Downloaded');
+    }
     timeEl.textContent = metaParts.filter(Boolean).join(' • ');
     info.appendChild(timeEl);
 
@@ -5866,21 +6002,29 @@
 
     // Download button
     const downloadBtn = createActionBtn(icons.download, 'Download', async () => {
-      if (!draft.download_url) return;
       try {
-        const res = await fetch(draft.download_url);
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `sora-draft-${draft.id}.mp4`;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        const result = await downloadDraftToFile(draft, {
+          preferNoWatermark: uvDraftsDownloadPrefs.preferNoWatermark,
+          allowWatermarkFallback: uvDraftsDownloadPrefs.allowWatermarkFallback,
+          skipAlreadyDownloaded: uvDraftsDownloadPrefs.skipAlreadyDownloaded,
+        });
+        if (result.ok) {
+          flashIconSuccess(downloadBtn, icons.download);
+          rerenderUVDraftsGridForLocalMutation([draft.id]);
+          updateUVDraftsStats();
+        }
       } catch (err) {
         console.error('[UV Drafts] Download error:', err);
       }
     });
-    downloadBtn.disabled = hasBlockedDraftActions || !draft.download_url;
+    const hasAnyDownloadUrl = !!resolveDraftDownloadTarget(draft, {
+      preferNoWatermark: uvDraftsDownloadPrefs.preferNoWatermark,
+      allowWatermarkFallback: uvDraftsDownloadPrefs.allowWatermarkFallback,
+    })?.url;
+    downloadBtn.disabled = hasBlockedDraftActions || !hasAnyDownloadUrl || (uvDraftsDownloadPrefs.skipAlreadyDownloaded && draft?.is_downloaded === true);
+    if (draft?.is_downloaded === true && uvDraftsDownloadPrefs.skipAlreadyDownloaded) {
+      downloadBtn.title = 'Already downloaded';
+    }
     actionsRow.appendChild(downloadBtn);
 
     // Hide button
@@ -6598,15 +6742,27 @@
     const workspaceScopedDrafts = filterDraftsByWorkspace(uvDraftsData, uvDraftsWorkspaceFilter);
     const { total, bookmarked, hidden, newCount } = computeUVDraftsStats();
     const unsyncedCount = workspaceScopedDrafts.reduce((count, draft) => count + (draft?.is_unsynced === true ? 1 : 0), 0);
-    statsEl.textContent = `${total} drafts • ${bookmarked} bookmarked • ${hidden} hidden • ${newCount} new • ${unsyncedCount} unsynced`;
+    const downloadedCount = workspaceScopedDrafts.reduce((count, draft) => count + (draft?.is_downloaded === true ? 1 : 0), 0);
+    statsEl.textContent = `${total} drafts • ${bookmarked} bookmarked • ${hidden} hidden • ${newCount} new • ${unsyncedCount} unsynced • ${downloadedCount} downloaded`;
     setUVDraftsSyncUiState({ processed: total });
   }
 
   function setUVDraftsSyncUiState(nextState = {}) {
+    const wasSyncing = uvDraftsSyncUiState.syncing === true;
     uvDraftsSyncUiState = {
       ...uvDraftsSyncUiState,
       ...nextState,
     };
+    const isSyncing = uvDraftsSyncUiState.syncing === true;
+    if (isSyncing) {
+      uvDraftsAutoBulkArmed = uvDraftsDownloadPrefs.autoBulkAfterSync === true;
+    } else if (wasSyncing && uvDraftsAutoBulkArmed && uvDraftsDownloadPrefs.autoBulkAfterSync === true) {
+      uvDraftsAutoBulkArmed = false;
+      runBulkDraftDownload({ skipConfirm: true, autoTriggered: true }).catch((err) => {
+        console.error('[UV Drafts] Auto bulk download after sync failed:', err);
+        setBulkDownloadStatus('Auto bulk download failed.');
+      });
+    }
     persistSyncUiState();
 
     if (!uvDraftsSyncButtonEl) return;
@@ -6623,6 +6779,81 @@
 
     uvDraftsSyncButtonEl.textContent = `↻ Sync (${processed})`;
     uvDraftsSyncButtonEl.disabled = false;
+  }
+
+  function setBulkDownloadStatus(message = '') {
+    if (uvDraftsBulkDownloadStatusEl) {
+      uvDraftsBulkDownloadStatusEl.textContent = message;
+    }
+  }
+
+  function updateBulkDownloadButton() {
+    if (!uvDraftsBulkDownloadBtnEl) return;
+    if (uvDraftsBulkDownloadRunning) {
+      uvDraftsBulkDownloadBtnEl.disabled = true;
+      uvDraftsBulkDownloadBtnEl.textContent = 'Downloading...';
+      return;
+    }
+    uvDraftsBulkDownloadBtnEl.disabled = false;
+    uvDraftsBulkDownloadBtnEl.textContent = '⬇ Bulk Download';
+  }
+
+  async function runBulkDraftDownload(options = {}) {
+    const skipConfirm = options?.skipConfirm === true;
+    const autoTriggered = options?.autoTriggered === true;
+    if (uvDraftsBulkDownloadRunning) return;
+    const candidates = getRenderableUVDrafts()
+      .filter((draft) => {
+        if (!draft || draft.is_pending === true) return false;
+        if (uvDraftsDownloadPrefs.skipAlreadyDownloaded && draft?.is_downloaded === true) return false;
+        return !!resolveDraftDownloadTarget(draft, {
+          preferNoWatermark: uvDraftsDownloadPrefs.preferNoWatermark,
+          allowWatermarkFallback: uvDraftsDownloadPrefs.allowWatermarkFallback,
+        })?.url;
+      });
+    if (candidates.length === 0) {
+      setBulkDownloadStatus('No downloadable drafts in current filter.');
+      return;
+    }
+    if (!skipConfirm && !confirm(`Download ${candidates.length} draft video(s) from current filtered results?\n\nFiles will use username/date/video.mp4 folders.`)) return;
+
+    uvDraftsBulkDownloadRunning = true;
+    updateBulkDownloadButton();
+    let okCount = 0;
+    let skippedCount = 0;
+    let failedCount = 0;
+    let watermarkCount = 0;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const draft = candidates[i];
+      setBulkDownloadStatus(`Downloading ${i + 1}/${candidates.length}...`);
+      try {
+        const result = await downloadDraftToFile(draft, {
+          preferNoWatermark: uvDraftsDownloadPrefs.preferNoWatermark,
+          allowWatermarkFallback: uvDraftsDownloadPrefs.allowWatermarkFallback,
+          skipAlreadyDownloaded: uvDraftsDownloadPrefs.skipAlreadyDownloaded,
+        });
+        if (result.ok) {
+          okCount += 1;
+          if (result.watermark) watermarkCount += 1;
+        } else if (result.reason === 'already_downloaded') {
+          skippedCount += 1;
+        } else {
+          failedCount += 1;
+        }
+      } catch (err) {
+        failedCount += 1;
+        console.error('[UV Drafts] Bulk download failed for draft:', draft?.id, err);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+
+    uvDraftsBulkDownloadRunning = false;
+    updateBulkDownloadButton();
+    const mode = autoTriggered ? 'Auto sync' : 'Manual';
+    setBulkDownloadStatus(`${mode} done. ${okCount} downloaded (${watermarkCount} watermarked), ${skippedCount} skipped, ${failedCount} failed.`);
+    rerenderUVDraftsGridForLocalMutation();
+    updateUVDraftsStats();
   }
 
   async function initUVDraftsPage(fullSync = false) {
@@ -7289,6 +7520,7 @@
         <option value="violations">Violations</option>
         <option value="new">New Only</option>
         <option value="unsynced">Unsynced</option>
+        <option value="downloaded">Downloaded</option>
       `;
     if (Array.from(filterSelect.options).some((opt) => opt.value === uvDraftsFilterState)) {
       filterSelect.value = uvDraftsFilterState;
@@ -7324,6 +7556,85 @@
     });
     uvWorkspaceSelectEl = workspaceSelect;
     filterBar.appendChild(workspaceSelect);
+
+    const downloadsOptionsWrap = document.createElement('div');
+    downloadsOptionsWrap.style.display = 'inline-flex';
+    downloadsOptionsWrap.style.alignItems = 'center';
+    downloadsOptionsWrap.style.gap = '10px';
+    downloadsOptionsWrap.style.flexWrap = 'wrap';
+
+    const preferNoWmLabel = document.createElement('label');
+    preferNoWmLabel.style.display = 'inline-flex';
+    preferNoWmLabel.style.alignItems = 'center';
+    preferNoWmLabel.style.gap = '6px';
+    const preferNoWmInput = document.createElement('input');
+    preferNoWmInput.type = 'checkbox';
+    preferNoWmInput.checked = uvDraftsDownloadPrefs.preferNoWatermark;
+    preferNoWmInput.addEventListener('change', () => {
+      uvDraftsDownloadPrefs.preferNoWatermark = preferNoWmInput.checked;
+      persistDownloadPrefs();
+      renderUVDraftsGrid(false);
+    });
+    preferNoWmLabel.appendChild(preferNoWmInput);
+    preferNoWmLabel.appendChild(document.createTextNode('Prefer no watermark'));
+    downloadsOptionsWrap.appendChild(preferNoWmLabel);
+
+    const skipDownloadedLabel = document.createElement('label');
+    skipDownloadedLabel.style.display = 'inline-flex';
+    skipDownloadedLabel.style.alignItems = 'center';
+    skipDownloadedLabel.style.gap = '6px';
+    const skipDownloadedInput = document.createElement('input');
+    skipDownloadedInput.type = 'checkbox';
+    skipDownloadedInput.checked = uvDraftsDownloadPrefs.skipAlreadyDownloaded;
+    skipDownloadedInput.addEventListener('change', () => {
+      uvDraftsDownloadPrefs.skipAlreadyDownloaded = skipDownloadedInput.checked;
+      persistDownloadPrefs();
+      renderUVDraftsGrid(false);
+    });
+    skipDownloadedLabel.appendChild(skipDownloadedInput);
+    skipDownloadedLabel.appendChild(document.createTextNode('Skip downloaded'));
+    downloadsOptionsWrap.appendChild(skipDownloadedLabel);
+
+    const autoBulkLabel = document.createElement('label');
+    autoBulkLabel.style.display = 'inline-flex';
+    autoBulkLabel.style.alignItems = 'center';
+    autoBulkLabel.style.gap = '6px';
+    const autoBulkInput = document.createElement('input');
+    autoBulkInput.type = 'checkbox';
+    autoBulkInput.checked = uvDraftsDownloadPrefs.autoBulkAfterSync;
+    autoBulkInput.addEventListener('change', () => {
+      uvDraftsDownloadPrefs.autoBulkAfterSync = autoBulkInput.checked;
+      persistDownloadPrefs();
+      setBulkDownloadStatus(autoBulkInput.checked
+        ? 'Auto bulk download will run after sync finishes.'
+        : '');
+    });
+    autoBulkLabel.appendChild(autoBulkInput);
+    autoBulkLabel.appendChild(document.createTextNode('Auto after sync'));
+    downloadsOptionsWrap.appendChild(autoBulkLabel);
+
+    const bulkDownloadBtn = document.createElement('button');
+    bulkDownloadBtn.className = 'uvd-cta';
+    bulkDownloadBtn.type = 'button';
+    bulkDownloadBtn.textContent = '⬇ Bulk Download';
+    bulkDownloadBtn.addEventListener('click', () => {
+      runBulkDraftDownload().catch((err) => {
+        console.error('[UV Drafts] Bulk download error:', err);
+        uvDraftsBulkDownloadRunning = false;
+        updateBulkDownloadButton();
+        setBulkDownloadStatus('Bulk download failed.');
+      });
+    });
+    uvDraftsBulkDownloadBtnEl = bulkDownloadBtn;
+    downloadsOptionsWrap.appendChild(bulkDownloadBtn);
+    filterBar.appendChild(downloadsOptionsWrap);
+
+    const bulkDownloadStatus = document.createElement('span');
+    bulkDownloadStatus.className = 'uvd-sync-status';
+    uvDraftsBulkDownloadStatusEl = bulkDownloadStatus;
+    setBulkDownloadStatus('');
+    updateBulkDownloadButton();
+    filterBar.appendChild(bulkDownloadStatus);
 
     // Load workspaces async
     loadWorkspaces().then(() => {

@@ -42,6 +42,7 @@
   const ANALYZE_VISITED_KEY = 'SORA_UV_ANALYZE_VISITED';
   const ANALYZE_VISITED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
   const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
+  const PUBLIC_DOWNLOADS_KEY = 'SORA_UV_PUBLIC_DOWNLOADS_V1';
   const TASK_TO_DRAFT_KEY = 'SORA_UV_TASK_TO_DRAFT_V1'; // task_id -> source draft ID for draft remixes
   const VIDEO_GENS_BALANCE_KEY = 'SCT_VIDEO_GENS_BALANCE_V1';
   const VIDEO_GENS_BALANCE_EVENT = 'sct_video_gens_balance';
@@ -77,6 +78,7 @@
   const idToDimensions = new Map(); // Video dimensions { width, height }
   const idToPrompt = new Map(); // Draft prompt text
   const idToDownloadUrl = new Map(); // Draft downloadable URL
+  const idToPublicDownloadUrl = new Map(); // Public post downloadable URL (best-effort)
   const idToViolation = new Map(); // Draft content violation status
   const idToRemixTarget = new Map(); // Draft remix target post ID (if it's a remix of a post)
   const idToRemixTargetDraft = new Map(); // Draft remix target draft ID (if it's a remix of a draft)
@@ -310,6 +312,7 @@
   // 0 = show all, 1 = show bookmarked only, 2 = show unbookmarked only, 3 = violations only
   let bookmarksFilterState = 0;
   let bookmarksBtn = null;
+  let publicBulkDownloadBtn = null;
 
   // Dashboard injection perf guards
   let dashboardBtnEl = null;
@@ -3028,6 +3031,22 @@ function badgeEmojiFor(id, meta) {
     analyzeBtn.classList.add('sora-uv-analyze-btn');
     analyzeBtn.style.display = 'none';
     buttonRow.appendChild(analyzeBtn);
+
+    // Public bulk download (Explore/Profile/Post)
+    publicBulkDownloadBtn = document.createElement('button');
+    makePill(publicBulkDownloadBtn, 'Bulk DL');
+    publicBulkDownloadBtn.classList.add('sora-uv-public-download-btn');
+    publicBulkDownloadBtn.style.display = 'none';
+    publicBulkDownloadBtn.onclick = () => {
+      if (publicBulkDownloadBtn.disabled) return;
+      bulkDownloadPublicPosts().catch((err) => {
+        console.error('[SoraUV] Public bulk download error:', err);
+        if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
+        if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
+        if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
+      });
+    };
+    buttonRow.appendChild(publicBulkDownloadBtn);
 
     // Bookmarks (Drafts only; visibility handled later)
     const bookmarksContainer = document.createElement('div');
@@ -5869,6 +5888,8 @@ async function renderAnalyzeTable(force = false) {
         (typeof p?.caption === 'string' && p.caption) ? p.caption : (typeof p?.text === 'string' && p.text ? p.text : null);
       const ageMin = minutesSince(created_at);
       const th = getThumbnail(it);
+      const publicDownloadUrl = resolvePublicDownloadUrl(it);
+      if (publicDownloadUrl) idToPublicDownloadUrl.set(id, publicDownloadUrl);
 
       // Extract video duration from n_frames (Sora uses 30 fps for published posts)
       try {
@@ -7314,6 +7335,12 @@ async function renderAnalyzeTable(force = false) {
     // Analyze button on all feeds except Drafts
     if (analyzeBtn) analyzeBtn.style.display = isDrafts() ? 'none' : '';
 
+    // Public bulk download button on Explore/Profile/Post (not drafts/editor)
+    if (publicBulkDownloadBtn) {
+      const showPublicBulkDownload = !isDrafts() && !isDraftEditor() && (isTopFeed() || isProfile() || isPost() || isExplore());
+      publicBulkDownloadBtn.style.display = showPublicBulkDownload ? '' : 'none';
+    }
+
     // Bookmarks button only on Drafts page
     if (bookmarksBtn) bookmarksBtn.style.display = isDrafts() ? '' : 'none';
 
@@ -7462,6 +7489,110 @@ async function renderAnalyzeTable(force = false) {
   }
   function setPrefs(p) {
     localStorage.setItem(PREF_KEY, JSON.stringify(p));
+  }
+
+  function getPublicDownloadedIds() {
+    try {
+      const data = JSON.parse(localStorage.getItem(PUBLIC_DOWNLOADS_KEY) || '{}');
+      const ids = Array.isArray(data.ids) ? data.ids : [];
+      return new Set(ids.map((id) => String(id || '').trim()).filter(Boolean));
+    } catch {
+      return new Set();
+    }
+  }
+
+  function setPublicDownloadedIds(idsSet) {
+    try {
+      localStorage.setItem(PUBLIC_DOWNLOADS_KEY, JSON.stringify({ ids: Array.from(idsSet || []) }));
+    } catch {}
+  }
+
+  function markPublicPostDownloaded(postId) {
+    const id = String(postId || '').trim();
+    if (!id) return;
+    const downloaded = getPublicDownloadedIds();
+    downloaded.add(id);
+    setPublicDownloadedIds(downloaded);
+  }
+
+  function sanitizeDownloadPathPart(value, fallback = 'unknown') {
+    const cleaned = String(value || '')
+      .trim()
+      .replace(/[\\/:*?"<>|]/g, '-')
+      .replace(/\s+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return cleaned || fallback;
+  }
+
+  function resolvePublicDownloadUrl(item) {
+    const p = item?.post || item || {};
+    const directCandidates = [
+      p?.downloadable_url,
+      p?.download_urls?.no_watermark,
+      p?.download_urls?.watermark,
+      p?.video_url,
+      p?.url,
+      p?.video?.url,
+      p?.video?.download_url,
+      p?.media?.url,
+    ];
+    for (const candidate of directCandidates) {
+      if (typeof candidate === 'string' && /^https?:\/\//i.test(candidate)) return candidate;
+    }
+    const attachments = Array.isArray(p?.attachments) ? p.attachments : [];
+    for (const attachment of attachments) {
+      const candidate = attachment?.downloadable_url || attachment?.url || attachment?.src || attachment?.path;
+      if (typeof candidate === 'string' && /^https?:\/\//i.test(candidate)) return candidate;
+    }
+    return '';
+  }
+
+  function buildPublicDownloadPath(postId) {
+    const meta = idToMeta.get(postId) || {};
+    const user = sanitizeDownloadPathPart(meta.userHandle || 'unknown-user', 'unknown-user');
+    let datePart = 'unknown-date';
+    if (Number.isFinite(meta.createdAtMs) && meta.createdAtMs > 0) {
+      const dt = new Date(meta.createdAtMs);
+      datePart = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+    }
+    return `${user}/${datePart}/sora-post-${sanitizeDownloadPathPart(postId, 'unknown')}.mp4`;
+  }
+
+  async function bulkDownloadPublicPosts() {
+    const downloadedIds = getPublicDownloadedIds();
+    const candidates = [...idToPublicDownloadUrl.entries()]
+      .map(([postId, url]) => ({ postId: String(postId || '').trim(), url: String(url || '').trim() }))
+      .filter((row) => row.postId && row.url && !downloadedIds.has(row.postId));
+    if (!candidates.length) {
+      alert('No new downloadable public videos found on this page yet.');
+      return;
+    }
+    if (!confirm(`Download ${candidates.length} public video(s)?`)) return;
+
+    if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel(`DL ${candidates.length}...`);
+    if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
+    if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
+    for (const candidate of candidates) {
+      try {
+        const response = await fetch(candidate.url);
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = buildPublicDownloadPath(candidate.postId);
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+        markPublicPostDownloaded(candidate.postId);
+      } catch (err) {
+        console.error('[SoraUV] Public bulk download failed:', candidate.postId, err);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+    if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
+    if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
+    if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
   }
 
   // == Bookmarks (Drafts) ==
