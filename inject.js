@@ -8417,8 +8417,8 @@ async function renderAnalyzeTable(force = false) {
         url.searchParams.delete('page_cursor');
         url.searchParams.delete('next_cursor');
         const rawLimit = Number.parseInt(String(url.searchParams.get('limit') || ''), 10);
-        if (!Number.isFinite(rawLimit) || rawLimit < 20) {
-          url.searchParams.set('limit', '20');
+        if (!Number.isFinite(rawLimit) || rawLimit < 8) {
+          url.searchParams.set('limit', '8');
         }
         return url.toString();
       } catch {
