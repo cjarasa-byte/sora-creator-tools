@@ -287,6 +287,7 @@
   let gatherRefreshTimeoutId = null;
   let gatherCountdownIntervalId = null;
   let publicIndexHydrationInFlight = false;
+  let publicIndexHydrationPromise = null;
   let isGatheringActiveThisTab = false;
 
   // Analyze (Top feed only)
@@ -8421,7 +8422,7 @@ async function renderAnalyzeTable(force = false) {
   }
 
   async function hydratePublicVideoIndex() {
-    if (publicIndexHydrationInFlight) return;
+    if (publicIndexHydrationPromise) return publicIndexHydrationPromise;
     const baseUrl = (() => {
       if (!lastFeedUrlTemplate) return '';
       try {
@@ -8448,94 +8449,103 @@ async function renderAnalyzeTable(force = false) {
       return;
     }
 
-    publicIndexHydrationInFlight = true;
-    setPublicHydrationStatus({
-      visible: true,
-      percent: 0,
-      text: 'Preparing feed hydration…',
-    });
-    if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Loading...');
-    if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
-    if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
-
-    let totalItems = 0;
-    let cursor = '';
-    let usedCursor = false;
-    let attemptIndex = 0;
-    const seenCursors = new Set();
-    const MAX_PAGES = 120;
-    const expectedPostCount = await fetchProfilePostCountEstimate();
-    if (expectedPostCount && expectedPostCount > 0) {
+    publicIndexHydrationPromise = (async () => {
+      publicIndexHydrationInFlight = true;
       setPublicHydrationStatus({
         visible: true,
         percent: 0,
-        text: `Loading profile feed… 0/${expectedPostCount} posts`,
+        text: 'Preparing feed hydration…',
       });
-    }
-    try {
-      for (let page = 0; page < MAX_PAGES; page += 1) {
-        const url = usedCursor ? addCursorToUrl(baseUrl, cursor, attemptIndex) : baseUrl;
-        const response = await fetch(url, {
-          method: 'GET',
-          credentials: 'include',
-          headers: buildBackendJsonHeaders(),
-        });
-        if (!response.ok) break;
-        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-        if (!contentType.includes('json')) break;
-        const json = await response.json();
-        processFeedJson(json);
+      if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Loading...');
+      if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
+      if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
 
-        const items = json?.items || json?.data?.items || [];
-        totalItems += items.length;
-        const afterCount = idToPublicDownloadUrl.size;
-        const percent = expectedPostCount && expectedPostCount > 0
-          ? (totalItems / expectedPostCount) * 100
-          : Math.min(95, ((page + 1) / MAX_PAGES) * 100);
-        const label = expectedPostCount && expectedPostCount > 0
-          ? `Loading profile feed… ${Math.min(totalItems, expectedPostCount)}/${expectedPostCount} posts • ${afterCount} videos indexed`
-          : `Loading feed page ${page + 1}… ${afterCount} videos indexed`;
+      let totalItems = 0;
+      let cursor = '';
+      let usedCursor = false;
+      let attemptIndex = 0;
+      let page = 0;
+      const seenCursors = new Set();
+      const expectedPostCount = await fetchProfilePostCountEstimate();
+      if (expectedPostCount && expectedPostCount > 0) {
         setPublicHydrationStatus({
           visible: true,
-          percent,
-          text: label,
+          percent: 0,
+          text: `Loading profile feed… 0/${expectedPostCount} posts`,
         });
-        // Keep paging while the feed provides a new cursor: some pages contain non-video items
-        // or videos without downloadable URLs, so the indexed count may stall temporarily.
+      }
+      try {
+        while (true) {
+          const url = usedCursor ? addCursorToUrl(baseUrl, cursor, attemptIndex) : baseUrl;
+          const response = await fetch(url, {
+            method: 'GET',
+            credentials: 'include',
+            headers: buildBackendJsonHeaders(),
+          });
+          if (!response.ok) break;
+          const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+          if (!contentType.includes('json')) break;
+          const json = await response.json();
+          processFeedJson(json);
 
-        const nextCursor = detectFeedNextCursor(json);
-        if (!nextCursor || seenCursors.has(nextCursor)) {
-          if (!usedCursor && attemptIndex < 2) {
-            usedCursor = true;
-            attemptIndex += 1;
-            continue;
+          page += 1;
+          const items = json?.items || json?.data?.items || [];
+          totalItems += items.length;
+          const afterCount = idToPublicDownloadUrl.size;
+          const percent = expectedPostCount && expectedPostCount > 0
+            ? (totalItems / expectedPostCount) * 100
+            : 0;
+          const label = expectedPostCount && expectedPostCount > 0
+            ? `Loading profile feed… ${Math.min(totalItems, expectedPostCount)}/${expectedPostCount} posts • ${afterCount} videos indexed`
+            : `Loading feed page ${page}… ${afterCount} videos indexed`;
+          setPublicHydrationStatus({
+            visible: true,
+            percent,
+            text: label,
+          });
+          // Keep paging while the feed provides a new cursor: some pages contain non-video items
+          // or videos without downloadable URLs, so the indexed count may stall temporarily.
+
+          const nextCursor = detectFeedNextCursor(json);
+          if (!nextCursor || seenCursors.has(nextCursor)) {
+            if (!usedCursor && attemptIndex < 2) {
+              usedCursor = true;
+              attemptIndex += 1;
+              continue;
+            }
+            break;
           }
-          break;
-        }
-        seenCursors.add(nextCursor);
-        usedCursor = true;
-        cursor = nextCursor;
+          seenCursors.add(nextCursor);
+          usedCursor = true;
+          cursor = nextCursor;
 
-        if (publicBulkDownloadBtn?.setLabel) {
-          publicBulkDownloadBtn.setLabel(`Load ${afterCount}...`);
+          if (publicBulkDownloadBtn?.setLabel) {
+            publicBulkDownloadBtn.setLabel(`Load ${afterCount}...`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      } finally {
+        publicIndexHydrationInFlight = false;
+        if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
+        if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
+        if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
+        setPublicHydrationStatus({
+          visible: true,
+          percent: 100,
+          text: `Hydration complete • ${idToPublicDownloadUrl.size} videos indexed`,
+        });
+        if (totalItems > 0) {
+          try {
+            console.info(`[SoraUV] Loaded ${totalItems} public feed item(s); ${idToPublicDownloadUrl.size} downloadable video(s) indexed.`);
+          } catch {}
+        }
       }
+    })();
+
+    try {
+      await publicIndexHydrationPromise;
     } finally {
-      publicIndexHydrationInFlight = false;
-      if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
-      if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
-      if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
-      setPublicHydrationStatus({
-        visible: true,
-        percent: 100,
-        text: `Hydration complete • ${idToPublicDownloadUrl.size} videos indexed`,
-      });
-      if (totalItems > 0) {
-        try {
-          console.info(`[SoraUV] Loaded ${totalItems} public feed item(s); ${idToPublicDownloadUrl.size} downloadable video(s) indexed.`);
-        } catch {}
-      }
+      publicIndexHydrationPromise = null;
     }
   }
 
