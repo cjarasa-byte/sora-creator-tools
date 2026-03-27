@@ -96,6 +96,8 @@
   const processedPostDetailIds = new Set(); // Post detail responses already applied (avoid late duplicate overwrites)
   const pendingPostDetailIds = new Set(); // Post IDs currently being detail-fetched
   let lastPostDetailUrlTemplate = null; // Remember a detail URL pattern to reuse across posts
+  let lastFeedUrlTemplate = null; // Remember a feed URL pattern to reuse for public hydration paging
+  let profilePostCountEstimate = null; // Best-effort post count derived from feed/profile payloads
   const charToOriginalIndex = new Map(); // Store original order from API
   let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
 
@@ -498,24 +500,9 @@
   }
 
   async function fetchProfilePostCountEstimate() {
-    if (!isProfile()) return null;
-    const profileHandle = currentProfileHandleFromURL();
-    if (!profileHandle) return null;
-    try {
-      const url = `${location.origin}/backend/project_y/profile/username/${encodeURIComponent(profileHandle)}/`;
-      const res = await fetch(url, {
-        method: 'GET',
-        credentials: 'include',
-        headers: { Accept: 'application/json' },
-      });
-      if (!res.ok) return null;
-      const payload = await res.json();
-      const count = Number(payload?.post_count);
-      if (!Number.isFinite(count) || count < 0) return null;
-      return Math.floor(count);
-    } catch {
-      return null;
-    }
+    const count = Number(profilePostCountEstimate);
+    if (!Number.isFinite(count) || count < 0) return null;
+    return Math.floor(count);
   }
 
   // == Data extraction ==
@@ -5905,6 +5892,9 @@ async function renderAnalyzeTable(force = false) {
             console.error('[SoraUV] Error parsing drafts fetch response:', err);
           });
         } else if (FEED_RE.test(url)) {
+          if (typeof url === 'string' && url.includes('/backend/project_')) {
+            lastFeedUrlTemplate = url;
+          }
           dlog('feed', 'fetch matched', { url });
           res
             .clone()
@@ -5994,6 +5984,9 @@ async function renderAnalyzeTable(force = false) {
                 console.error('[SoraUV] Error parsing drafts XHR:', err);
               }
             } else if (FEED_RE.test(url)) {
+              if (typeof url === 'string' && url.includes('/backend/project_')) {
+                lastFeedUrlTemplate = url;
+              }
               dlog('feed', 'xhr matched', { url });
               try {
                 const j = JSON.parse(this.responseText);
@@ -6086,6 +6079,10 @@ async function renderAnalyzeTable(force = false) {
   }
 
   function processProfileJson(json){
+    try {
+      const count = Number(json?.post_count ?? json?.profile?.post_count ?? json?.data?.post_count);
+      if (Number.isFinite(count) && count >= 0) profilePostCountEstimate = Math.floor(count);
+    } catch {}
     const pageHandle = isProfile() ? currentProfileHandleFromURL() : null;
     const pageUserHandle = pageHandle || null;
     const pageUserKey = pageUserHandle ? `h:${pageUserHandle.toLowerCase()}` : 'unknown';
@@ -6100,6 +6097,16 @@ async function renderAnalyzeTable(force = false) {
 
   function processFeedJson(json) {
     const items = json?.items || json?.data?.items || [];
+    try {
+      const count = Number(
+        json?.post_count
+        ?? json?.profile?.post_count
+        ?? json?.data?.post_count
+        ?? json?.meta?.post_count
+        ?? json?.total_count
+      );
+      if (Number.isFinite(count) && count >= 0) profilePostCountEstimate = Math.floor(count);
+    } catch {}
     const pageHandle = isProfile() ? currentProfileHandleFromURL() : null;
     const pageUserHandle = pageHandle || null;
     const pageUserKey = pageUserHandle ? `h:${pageUserHandle.toLowerCase()}` : 'unknown';
@@ -8402,8 +8409,9 @@ async function renderAnalyzeTable(force = false) {
   async function hydratePublicVideoIndex() {
     if (publicIndexHydrationInFlight) return;
     const baseUrl = (() => {
+      if (!lastFeedUrlTemplate) return '';
       try {
-        const url = new URL(location.href);
+        const url = new URL(lastFeedUrlTemplate, location.origin);
         url.searchParams.delete('gather');
         url.searchParams.delete('cursor');
         url.searchParams.delete('page_cursor');
@@ -8414,9 +8422,17 @@ async function renderAnalyzeTable(force = false) {
         }
         return url.toString();
       } catch {
-        return location.href;
+        return '';
       }
     })();
+    if (!baseUrl) {
+      setPublicHydrationStatus({
+        visible: true,
+        percent: 100,
+        text: `Hydration skipped • ${idToPublicDownloadUrl.size} videos indexed (scroll to load more first)`,
+      });
+      return;
+    }
 
     publicIndexHydrationInFlight = true;
     setPublicHydrationStatus({
@@ -8451,6 +8467,8 @@ async function renderAnalyzeTable(force = false) {
           headers: { Accept: 'application/json' },
         });
         if (!response.ok) break;
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.includes('json')) break;
         const json = await response.json();
         processFeedJson(json);
 
