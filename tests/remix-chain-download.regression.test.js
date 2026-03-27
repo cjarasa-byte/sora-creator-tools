@@ -99,3 +99,57 @@ test('buildRemixChainDownloadCandidates follows parent and child remix graph', a
     { postId: 's_c', url: 'https://videos.openai.com/c.mp4', assetKey: 'https://videos.openai.com/c.mp4' },
   ]);
 });
+
+test('processPostDetailJson traverses children tree nodes so remix descendants are captured', () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const fnStart = src.indexOf('  function processPostDetailJson(json) {');
+  const fnEnd = src.indexOf('  function looksLikePendingV2Task(item) {', fnStart);
+  assert.notEqual(fnStart, -1, 'processPostDetailJson start not found');
+  assert.notEqual(fnEnd, -1, 'processPostDetailJson end not found');
+
+  const capturedIds = [];
+  const context = vm.createContext({
+    processedPostDetailIds: new Set(),
+    suppressDetailBadgeRender: false,
+    idToMeta: new Map(),
+    idToUnique: new Map(),
+    idToLikes: new Map(),
+    idToViews: new Map(),
+    idToComments: new Map(),
+    idToRemixes: new Map(),
+    lockedPostIds: new Set(),
+    currentSIdFromURL: () => 's_root',
+    dlog: () => {},
+    processFeedJson: ({ items }) => {
+      for (const item of items || []) {
+        const p = item?.post || item;
+        if (p?.id) capturedIds.push(p.id);
+      }
+    },
+    renderDetailBadge: () => {},
+    updateRemixChainButtonState: () => {},
+  });
+  vm.runInContext(`${src.slice(fnStart, fnEnd)}\nglobalThis.__fn = processPostDetailJson;`, context, {
+    filename: 'inject-process-post-detail-tree.harness.js',
+  });
+
+  context.__fn({
+    post: { id: 's_root', unique_view_count: 10, like_count: 4 },
+    children: {
+      items: [
+        {
+          post: { id: 's_child_a', unique_view_count: 9, like_count: 2 },
+          children: {
+            items: [
+              {
+                post: { id: 's_child_b', unique_view_count: 7, like_count: 1 },
+              },
+            ],
+          },
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(Array.from(new Set(capturedIds)).sort(), ['s_child_a', 's_child_b', 's_root']);
+});

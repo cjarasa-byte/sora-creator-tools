@@ -6477,29 +6477,58 @@ async function renderAnalyzeTable(force = false) {
         }
       }
       
-      // Now process other data (their data can still be stored, but won't overwrite locked posts)
-      
-      // Process ancestors (these are parent posts in the chain)
-      if (json?.ancestors?.items && Array.isArray(json.ancestors.items)) {
-        processFeedJson({ items: json.ancestors.items });
-        dlog('feed', 'processed ancestors', { count: json.ancestors.items.length });
-      }
-      
-      // Process parent_post (immediate parent)
-      if (json?.parent_post) {
-        processFeedJson({ items: [json.parent_post] });
-        dlog('feed', 'processed parent_post');
-      }
-      
-      // Process remix_posts (child remixes - these should NOT affect the main post)
-      if (json?.remix_posts?.items && Array.isArray(json.remix_posts.items)) {
-        processFeedJson({ items: json.remix_posts.items });
-        dlog('feed', 'processed remix_posts', { count: json.remix_posts.items.length });
-      }
-      
-      // Skip children (replies/comments). We only collect posts and remixes.
-      if (json?.children?.items && Array.isArray(json.children.items)) {
-        dlog('feed', 'skipped children (comments)', { count: json.children.items.length });
+      // Now process related tree data (their data can still be stored, but won't overwrite locked posts)
+      // Some tree payloads place remix descendants under `children.items` (not only `remix_posts.items`).
+      // Traverse all known relationship buckets so chain downloads also capture stats for sibling/descendant videos.
+      const gatherTreeItems = (payload) => {
+        const out = [];
+        const seenRefs = new Set();
+        const queue = [];
+        const push = (value) => {
+          if (!value || typeof value !== 'object') return;
+          if (seenRefs.has(value)) return;
+          seenRefs.add(value);
+          queue.push(value);
+        };
+        const pushItems = (container) => {
+          if (!container) return;
+          if (Array.isArray(container)) {
+            for (const it of container) push(it);
+            return;
+          }
+          if (Array.isArray(container?.items)) {
+            for (const it of container.items) push(it);
+          }
+        };
+
+        pushItems(payload?.ancestors?.items || payload?.ancestors);
+        push(payload?.parent_post);
+        pushItems(payload?.remix_posts?.items || payload?.remix_posts);
+        pushItems(payload?.children?.items || payload?.children);
+
+        let safety = 0;
+        while (queue.length && safety < 2000) {
+          safety += 1;
+          const item = queue.shift();
+          if (!item || typeof item !== 'object') continue;
+          out.push(item);
+          const post = item?.post || item;
+          push(post?.parent_post);
+          pushItems(post?.ancestors?.items || post?.ancestors);
+          pushItems(post?.remix_posts?.items || post?.remix_posts);
+          pushItems(post?.children?.items || post?.children);
+          push(item?.parent_post);
+          pushItems(item?.ancestors?.items || item?.ancestors);
+          pushItems(item?.remix_posts?.items || item?.remix_posts);
+          pushItems(item?.children?.items || item?.children);
+        }
+        return out;
+      };
+
+      const relatedItems = gatherTreeItems(json);
+      if (relatedItems.length) {
+        processFeedJson({ items: relatedItems });
+        dlog('feed', 'processed related post tree items', { count: relatedItems.length });
       }
       
       // Verify main post data is still correct after all processing
