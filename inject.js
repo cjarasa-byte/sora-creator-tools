@@ -97,6 +97,7 @@
   const pendingPostDetailIds = new Set(); // Post IDs currently being detail-fetched
   let lastPostDetailUrlTemplate = null; // Remember a detail URL pattern to reuse across posts
   let lastFeedUrlTemplate = null; // Remember a feed URL pattern to reuse for public hydration paging
+  let publicVideoIndexScopeKey = ''; // Route scope key for indexed public download URLs
   let profilePostCountEstimate = null; // Best-effort post count derived from feed/profile payloads
   const charToOriginalIndex = new Map(); // Store original order from API
   let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
@@ -451,6 +452,14 @@
 
   // == Page type helpers ==
   const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();
+  const isLikelyPostId = (value) => {
+    const raw = typeof value === 'string' ? normalizeId(value) : '';
+    if (!raw) return false;
+    if (/^s_[A-Za-z0-9]+$/i.test(raw)) return true;
+    // Some tree payloads return descendants as bare IDs (no `s_` prefix).
+    // Accept long alphanumeric IDs so chain traversal can include those posts.
+    return /^[A-Za-z0-9]{24,}$/i.test(raw);
+  };
   const isExplore = () => location.pathname.startsWith('/explore');
   const isProfile = () => location.pathname.startsWith('/profile');
   const isPost = () => /^\/p\/s_[A-Za-z0-9]+/i.test(location.pathname);
@@ -487,6 +496,29 @@
   function currentProfileHandleFromURL() {
     const m = location.pathname.match(/^\/profile\/(?:username\/)?([^\/?#]+)/i);
     return m ? m[1] : null;
+  }
+  function currentPublicIndexScopeKey() {
+    try {
+      const u = new URL(location.href);
+      const feed = String(u.searchParams.get('feed') || '').trim().toLowerCase();
+      if (u.pathname.startsWith('/profile/')) {
+        return `profile:${(currentProfileHandleFromURL() || '').toLowerCase()}`;
+      }
+      if (u.pathname.startsWith('/p/')) {
+        return `post:${(currentSIdFromURL() || '').toLowerCase()}`;
+      }
+      if (u.pathname === '/explore') {
+        return `explore:${feed || 'default'}`;
+      }
+      return `${u.pathname}?${u.search}`;
+    } catch {
+      return `${location.pathname || ''}?${location.search || ''}`;
+    }
+  }
+  function resetPublicVideoIndexCache() {
+    idToPublicDownloadUrl.clear();
+    profilePostCountEstimate = null;
+    publicVideoIndexScopeKey = currentPublicIndexScopeKey();
   }
 
   function setPublicHydrationStatus(opts = {}) {
@@ -735,7 +767,7 @@
   };
   const getItemId = (item) => {
     const cand = item?.post?.id || item?.post?.core_id || item?.post?.content_id || item?.id;
-    if (cand && /^s_[A-Za-z0-9]+$/i.test(cand)) return normalizeId(cand);
+    if (isLikelyPostId(cand)) return normalizeId(cand);
 
     // Guard against comment/reply objects: they often carry a parent/root post id
     // (s_...) plus text, but are not posts themselves. Deep search would otherwise
@@ -751,8 +783,8 @@
         item?.parent_post_id ||
         item?.root_post_id ||
         null;
-      const hasOwnSId = typeof ownId === 'string' && /^s_[A-Za-z0-9]+$/i.test(ownId);
-      const hasRefSId = typeof refId === 'string' && /^s_[A-Za-z0-9]+$/i.test(refId);
+      const hasOwnSId = isLikelyPostId(ownId);
+      const hasRefSId = isLikelyPostId(refId);
       const hasMediaOrMetrics =
         (Array.isArray(p?.attachments) && p.attachments.length > 0) ||
         typeof p?.preview_image_url === 'string' ||
@@ -767,7 +799,7 @@
     try {
       const p = item?.post ?? item ?? {};
       const ownId = p?.id || item?.id || null;
-      const hasOwnSId = typeof ownId === 'string' && /^s_[A-Za-z0-9]+$/i.test(ownId);
+      const hasOwnSId = isLikelyPostId(ownId);
       if (!hasOwnSId) {
         const refs = [
           p?.post_id,
@@ -792,7 +824,7 @@
       while (stack.length) {
         const cur = stack.pop();
         if (!cur) continue;
-        if (typeof cur === 'string' && /^s_[A-Za-z0-9]+$/i.test(cur)) return cur;
+        if (isLikelyPostId(cur)) return cur;
         if (Array.isArray(cur)) stack.push(...cur);
         else if (typeof cur === 'object') stack.push(...Object.values(cur));
       }
@@ -7790,6 +7822,7 @@ async function renderAnalyzeTable(force = false) {
       forceStopGatherOnNavigation();
       if (!shouldPreserveFilterAcrossNavigation(prev, rk)) resetFilterOnNavigation();
       if (!publicIndexHydrationInFlight) {
+        resetPublicVideoIndexCache();
         resetPublicHydrationStatus();
       }
       // Reset bookmarks filter on navigation
@@ -8469,6 +8502,10 @@ async function renderAnalyzeTable(force = false) {
 
   async function hydratePublicVideoIndex() {
     if (publicIndexHydrationPromise) return publicIndexHydrationPromise;
+    const routeScopeKey = currentPublicIndexScopeKey();
+    if (publicVideoIndexScopeKey !== routeScopeKey) {
+      resetPublicVideoIndexCache();
+    }
     const baseUrl = (() => {
       if (!lastFeedUrlTemplate) return '';
       try {
