@@ -2415,16 +2415,27 @@ function badgeEmojiFor(id, meta) {
     } catch {}
   }
 
+  function toBackendPostId(sid) {
+    const cleanId = typeof sid === 'string' ? normalizeId(sid) : '';
+    if (!cleanId) return '';
+    if (/^s_/i.test(cleanId)) return cleanId;
+    if (/^[A-Za-z0-9]{24,}$/i.test(cleanId)) return `s_${cleanId}`;
+    return cleanId;
+  }
+
   function buildPostDetailUrls(sid) {
     const urls = [];
+    const backendSid = toBackendPostId(sid);
     if (lastPostDetailUrlTemplate && lastPostDetailUrlTemplate.includes('{sid}')) {
-      urls.push(lastPostDetailUrlTemplate.replace('{sid}', sid));
+      urls.push(lastPostDetailUrlTemplate.replace('{sid}', backendSid || sid));
     }
     // Fallback guesses; keep small and same-origin.
-    urls.push(`${location.origin}/backend/project_y/post/${sid}/tree?limit=500&max_depth=100`);
-    urls.push(`${location.origin}/backend/project_y/post/${sid}/tree?limit=20&max_depth=1`);
-    urls.push(`${location.origin}/backend/project_y/post/${sid}/tree`);
-    urls.push(`${location.origin}/backend/project_y/post/${sid}`);
+    if (backendSid) {
+      urls.push(`${location.origin}/backend/project_y/post/${backendSid}/tree?limit=500&max_depth=100`);
+      urls.push(`${location.origin}/backend/project_y/post/${backendSid}/tree?limit=20&max_depth=1`);
+      urls.push(`${location.origin}/backend/project_y/post/${backendSid}/tree`);
+      urls.push(`${location.origin}/backend/project_y/post/${backendSid}`);
+    }
     urls.push(`${location.origin}/backend/posts/${sid}/tree?limit=500&max_depth=100`);
     urls.push(`${location.origin}/posts/${sid}/tree`);
     urls.push(`${location.origin}/backend/posts/${sid}/tree`);
@@ -8245,9 +8256,10 @@ async function renderAnalyzeTable(force = false) {
       }
     }
 
+    const backendRootId = toBackendPostId(rootId) || rootId;
     const treeUrls = [
-      `${location.origin}/backend/project_y/post/${rootId}/tree?limit=500&max_depth=100`,
-      `${location.origin}/backend/project_y/post/${rootId}/tree?limit=20&max_depth=1`,
+      `${location.origin}/backend/project_y/post/${backendRootId}/tree?limit=500&max_depth=100`,
+      `${location.origin}/backend/project_y/post/${backendRootId}/tree?limit=20&max_depth=1`,
       `${location.origin}/posts/${rootId}/tree?limit=500&max_depth=100`,
       `${location.origin}/posts/${rootId}/tree`,
     ];
