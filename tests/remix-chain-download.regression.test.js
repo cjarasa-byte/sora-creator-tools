@@ -62,6 +62,30 @@ test('getItemId accepts long bare post ids from tree children payloads', () => {
   );
 });
 
+test('buildPostDetailUrls prefixes bare ids for backend project_y lookups', () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const fnStart = src.indexOf('  function toBackendPostId(sid) {');
+  const fnEnd = src.indexOf('  async function fetchPostDetailOnce(sid) {', fnStart);
+  assert.notEqual(fnStart, -1, 'toBackendPostId start not found');
+  assert.notEqual(fnEnd, -1, 'buildPostDetailUrls end not found');
+
+  const context = vm.createContext({
+    normalizeId: (s) => String(s || '').split(/[?#]/)[0].trim(),
+    location: { origin: 'https://sora.chatgpt.com' },
+    lastPostDetailUrlTemplate: null,
+  });
+  vm.runInContext(`${src.slice(fnStart, fnEnd)}\nglobalThis.__fn = buildPostDetailUrls;`, context, {
+    filename: 'inject-build-post-detail-urls.harness.js',
+  });
+
+  const urls = context.__fn('69c4486bbf788191acdfb49500ce88e1');
+  assert.equal(
+    urls[0],
+    'https://sora.chatgpt.com/backend/project_y/post/s_69c4486bbf788191acdfb49500ce88e1/tree?limit=500&max_depth=100'
+  );
+  assert.ok(urls.some((url) => url.includes('/posts/69c4486bbf788191acdfb49500ce88e1/tree')));
+});
+
 test('buildRemixChainDownloadCandidates follows parent and child remix graph', async () => {
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
   const logStart = src.indexOf('  function remixChainLog(event, details) {');
@@ -99,6 +123,13 @@ test('buildRemixChainDownloadCandidates follows parent and child remix graph', a
     processPostDetailJson: () => {},
     fetch: async () => ({ ok: false, status: 404, json: async () => ({}) }),
     isKnownRemixPost: (id) => context.remixParentByPostId.has(id) || ((context.remixChildrenByPostId.get(id) || new Set()).size > 0),
+    toBackendPostId: (sid) => {
+      const clean = String(sid || '').split(/[?#]/)[0].trim();
+      if (!clean) return '';
+      if (/^s_/i.test(clean)) return clean;
+      if (/^[A-Za-z0-9]{24,}$/i.test(clean)) return `s_${clean}`;
+      return clean;
+    },
   });
 
   context.fetchPostDetailForChain = async (id) => {
