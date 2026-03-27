@@ -499,6 +499,9 @@
     publicHydrationStatusFillEl.style.width = `${safePct}%`;
     publicHydrationStatusTextEl.textContent = String(opts.text || '');
   }
+  function resetPublicHydrationStatus() {
+    setPublicHydrationStatus({ visible: false, percent: 0, text: '' });
+  }
 
   function buildBackendJsonHeaders(extraHeaders = null) {
     const headers = { Accept: 'application/json' };
@@ -2386,6 +2389,11 @@ function badgeEmojiFor(id, meta) {
       urls.push(lastPostDetailUrlTemplate.replace('{sid}', sid));
     }
     // Fallback guesses; keep small and same-origin.
+    urls.push(`${location.origin}/backend/project_y/post/${sid}/tree?limit=500&max_depth=100`);
+    urls.push(`${location.origin}/backend/project_y/post/${sid}/tree?limit=20&max_depth=1`);
+    urls.push(`${location.origin}/backend/project_y/post/${sid}/tree`);
+    urls.push(`${location.origin}/backend/project_y/post/${sid}`);
+    urls.push(`${location.origin}/backend/posts/${sid}/tree?limit=500&max_depth=100`);
     urls.push(`${location.origin}/posts/${sid}/tree`);
     urls.push(`${location.origin}/backend/posts/${sid}/tree`);
     return Array.from(new Set(urls));
@@ -5891,12 +5899,14 @@ async function renderAnalyzeTable(force = false) {
         if (POST_DETAIL_RE.test(url)) {
           dlog('feed', 'fetch matched post detail', { url });
           rememberPostDetailTemplate(url);
-          res.clone().json().then((j) => {
-            dlog('feed', 'post detail parsed', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
-            processPostDetailJson(j);
-          }).catch((err) => {
-            console.error('[SoraUV] Error parsing post detail fetch response:', err);
-          });
+          if (res.ok && isLikelyJsonResponse(res)) {
+            res.clone().json().then((j) => {
+              dlog('feed', 'post detail parsed', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
+              processPostDetailJson(j);
+            }).catch((err) => {
+              console.error('[SoraUV] Error parsing post detail fetch response:', err);
+            });
+          }
         } else if (CHARACTERS_RE.test(url)) {
           res.clone().json().then(processCharactersJson).catch((err) => {
             console.error('[SoraUV] Error parsing characters fetch response:', err);
@@ -5980,6 +5990,9 @@ async function renderAnalyzeTable(force = false) {
                 dlog('feed', 'xhr matched post detail', { url });
                 rememberPostDetailTemplate(url);
                 try {
+                if (this.status && this.status >= 400) return;
+                const ct = String(this.getResponseHeader('content-type') || '').toLowerCase();
+                if (!(ct.includes('application/json') || ct.includes('+json'))) return;
                 const j = JSON.parse(this.responseText);
                 dlog('feed', 'post detail parsed (XHR)', { url, hasPost: !!j?.post, hasRemixes: !!j?.remix_posts?.items });
                 processPostDetailJson(j);
@@ -7684,6 +7697,9 @@ async function renderAnalyzeTable(force = false) {
     if (publicBulkDownloadBtn) {
       const showPublicBulkDownload = !isDrafts() && !isDraftEditor() && (isTopFeed() || isProfile() || isPost() || isExplore());
       publicBulkDownloadBtn.style.display = showPublicBulkDownload ? '' : 'none';
+      if (!showPublicBulkDownload && !publicIndexHydrationInFlight) {
+        resetPublicHydrationStatus();
+      }
     }
     updateRemixChainButtonState();
 
@@ -7773,6 +7789,9 @@ async function renderAnalyzeTable(force = false) {
     if (navigated) {
       forceStopGatherOnNavigation();
       if (!shouldPreserveFilterAcrossNavigation(prev, rk)) resetFilterOnNavigation();
+      if (!publicIndexHydrationInFlight) {
+        resetPublicHydrationStatus();
+      }
       // Reset bookmarks filter on navigation
       bookmarksFilterState = 0;
       lastAppliedFilterState = -1;
@@ -8118,6 +8137,29 @@ async function renderAnalyzeTable(force = false) {
       });
   }
 
+  async function hydratePublicCandidatesFromVisiblePostCards() {
+    const anchors = Array.from(document.querySelectorAll('a[href*="/p/"]'));
+    const uniqueIds = [];
+    const seenIds = new Set();
+    for (const anchor of anchors) {
+      const id = extractPostIdFromHref(anchor.getAttribute('href'));
+      if (!id || seenIds.has(id)) continue;
+      seenIds.add(id);
+      uniqueIds.push(id);
+      if (uniqueIds.length >= 30) break;
+    }
+    if (!uniqueIds.length) return 0;
+
+    let hydratedCount = 0;
+    for (const id of uniqueIds) {
+      if (idToPublicDownloadUrl.has(id)) continue;
+      const ok = await fetchPostDetailForChain(id, { retries: 1 });
+      if (ok && idToPublicDownloadUrl.has(id)) hydratedCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    return hydratedCount;
+  }
+
   async function fetchPostDetailForChain(postId, opts = {}) {
     const sid = typeof postId === 'string' ? normalizeId(postId) : '';
     if (!sid) return false;
@@ -8359,7 +8401,11 @@ async function renderAnalyzeTable(force = false) {
 
     // Download every post we've indexed from feed pagination.
     // This supports large profile/explore sessions where users scroll through 1k+ videos.
-    const candidates = listPublicBulkDownloadCandidates();
+    let candidates = listPublicBulkDownloadCandidates();
+    if (!candidates.length) {
+      await hydratePublicCandidatesFromVisiblePostCards();
+      candidates = listPublicBulkDownloadCandidates();
+    }
     if (!candidates.length) {
       alert('No new downloadable public videos found on this page yet.');
       return;
