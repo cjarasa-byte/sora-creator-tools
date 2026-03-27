@@ -317,6 +317,10 @@
   let bookmarksFilterState = 0;
   let bookmarksBtn = null;
   let publicBulkDownloadBtn = null;
+  let publicHydrationStatusWrapEl = null;
+  let publicHydrationStatusTrackEl = null;
+  let publicHydrationStatusFillEl = null;
+  let publicHydrationStatusTextEl = null;
   let remixChainDownloadBtn = null;
   let remixChainDownloadInFlight = false;
   let remixChainProbeAtMs = 0;
@@ -480,6 +484,38 @@
   function currentProfileHandleFromURL() {
     const m = location.pathname.match(/^\/profile\/(?:username\/)?([^\/?#]+)/i);
     return m ? m[1] : null;
+  }
+
+  function setPublicHydrationStatus(opts = {}) {
+    if (!publicHydrationStatusWrapEl || !publicHydrationStatusFillEl || !publicHydrationStatusTextEl) return;
+    const visible = opts.visible !== false;
+    publicHydrationStatusWrapEl.style.display = visible ? 'flex' : 'none';
+    if (!visible) return;
+    const pct = Number(opts.percent);
+    const safePct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+    publicHydrationStatusFillEl.style.width = `${safePct}%`;
+    publicHydrationStatusTextEl.textContent = String(opts.text || '');
+  }
+
+  async function fetchProfilePostCountEstimate() {
+    if (!isProfile()) return null;
+    const profileHandle = currentProfileHandleFromURL();
+    if (!profileHandle) return null;
+    try {
+      const url = `${location.origin}/backend/project_y/profile/username/${encodeURIComponent(profileHandle)}/`;
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) return null;
+      const payload = await res.json();
+      const count = Number(payload?.post_count);
+      if (!Number.isFinite(count) || count < 0) return null;
+      return Math.floor(count);
+    } catch {
+      return null;
+    }
   }
 
   // == Data extraction ==
@@ -3125,6 +3161,55 @@ function badgeEmojiFor(id, meta) {
       });
     };
     buttonRow.appendChild(publicBulkDownloadBtn);
+
+    const hydrationStatusWrap = document.createElement('div');
+    hydrationStatusWrap.className = 'sora-uv-public-hydration-status';
+    Object.assign(hydrationStatusWrap.style, {
+      display: 'none',
+      width: '100%',
+      flexDirection: 'column',
+      gap: '5px',
+      marginTop: '6px',
+    });
+
+    const hydrationTrack = document.createElement('div');
+    Object.assign(hydrationTrack.style, {
+      width: '100%',
+      height: '6px',
+      borderRadius: '999px',
+      overflow: 'hidden',
+      background: 'rgba(255,255,255,0.14)',
+      border: '1px solid rgba(255,255,255,0.18)',
+    });
+
+    const hydrationFill = document.createElement('div');
+    Object.assign(hydrationFill.style, {
+      width: '0%',
+      height: '100%',
+      borderRadius: '999px',
+      transition: 'width 160ms ease',
+      background: 'linear-gradient(90deg, rgba(75,201,255,0.95), rgba(138,255,173,0.95))',
+    });
+    hydrationTrack.appendChild(hydrationFill);
+
+    const hydrationText = document.createElement('div');
+    Object.assign(hydrationText.style, {
+      width: '100%',
+      textAlign: 'center',
+      fontSize: '11px',
+      color: 'rgba(255,255,255,0.78)',
+      lineHeight: '1.2',
+      whiteSpace: 'nowrap',
+    });
+    hydrationText.textContent = '';
+
+    hydrationStatusWrap.appendChild(hydrationTrack);
+    hydrationStatusWrap.appendChild(hydrationText);
+    buttonRow.appendChild(hydrationStatusWrap);
+    publicHydrationStatusWrapEl = hydrationStatusWrap;
+    publicHydrationStatusTrackEl = hydrationTrack;
+    publicHydrationStatusFillEl = hydrationFill;
+    publicHydrationStatusTextEl = hydrationText;
 
     remixChainDownloadBtn = document.createElement('button');
     makePill(remixChainDownloadBtn, 'Chain DL');
@@ -8246,7 +8331,11 @@ async function renderAnalyzeTable(force = false) {
   }
 
   async function bulkDownloadPublicPosts() {
-    // Download every post we've indexed from the paginated public feed fetches.
+    // First hydrate the public feed index directly from paginated backend endpoints.
+    // This avoids requiring full-page media rendering/scrolling before bulk download.
+    await hydratePublicVideoIndex();
+
+    // Download every post we've indexed from feed pagination.
     // This supports large profile/explore sessions where users scroll through 1k+ videos.
     const candidates = listPublicBulkDownloadCandidates();
     if (!candidates.length) {
@@ -8316,6 +8405,13 @@ async function renderAnalyzeTable(force = false) {
       try {
         const url = new URL(location.href);
         url.searchParams.delete('gather');
+        url.searchParams.delete('cursor');
+        url.searchParams.delete('page_cursor');
+        url.searchParams.delete('next_cursor');
+        const rawLimit = Number.parseInt(String(url.searchParams.get('limit') || ''), 10);
+        if (!Number.isFinite(rawLimit) || rawLimit < 20) {
+          url.searchParams.set('limit', '20');
+        }
         return url.toString();
       } catch {
         return location.href;
@@ -8323,6 +8419,11 @@ async function renderAnalyzeTable(force = false) {
     })();
 
     publicIndexHydrationInFlight = true;
+    setPublicHydrationStatus({
+      visible: true,
+      percent: 0,
+      text: 'Preparing feed hydration…',
+    });
     if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Loading...');
     if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
     if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
@@ -8333,10 +8434,17 @@ async function renderAnalyzeTable(force = false) {
     let attemptIndex = 0;
     const seenCursors = new Set();
     const MAX_PAGES = 120;
+    const expectedPostCount = await fetchProfilePostCountEstimate();
+    if (expectedPostCount && expectedPostCount > 0) {
+      setPublicHydrationStatus({
+        visible: true,
+        percent: 0,
+        text: `Loading profile feed… 0/${expectedPostCount} posts`,
+      });
+    }
     try {
       for (let page = 0; page < MAX_PAGES; page += 1) {
         const url = usedCursor ? addCursorToUrl(baseUrl, cursor, attemptIndex) : baseUrl;
-        const beforeCount = idToPublicDownloadUrl.size;
         const response = await fetch(url, {
           method: 'GET',
           credentials: 'include',
@@ -8349,6 +8457,17 @@ async function renderAnalyzeTable(force = false) {
         const items = json?.items || json?.data?.items || [];
         totalItems += items.length;
         const afterCount = idToPublicDownloadUrl.size;
+        const percent = expectedPostCount && expectedPostCount > 0
+          ? (totalItems / expectedPostCount) * 100
+          : Math.min(95, ((page + 1) / MAX_PAGES) * 100);
+        const label = expectedPostCount && expectedPostCount > 0
+          ? `Loading profile feed… ${Math.min(totalItems, expectedPostCount)}/${expectedPostCount} posts • ${afterCount} videos indexed`
+          : `Loading feed page ${page + 1}… ${afterCount} videos indexed`;
+        setPublicHydrationStatus({
+          visible: true,
+          percent,
+          text: label,
+        });
         // Keep paging while the feed provides a new cursor: some pages contain non-video items
         // or videos without downloadable URLs, so the indexed count may stall temporarily.
 
@@ -8375,6 +8494,11 @@ async function renderAnalyzeTable(force = false) {
       if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
       if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
       if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
+      setPublicHydrationStatus({
+        visible: true,
+        percent: 100,
+        text: `Hydration complete • ${idToPublicDownloadUrl.size} videos indexed`,
+      });
       if (totalItems > 0) {
         try {
           console.info(`[SoraUV] Loaded ${totalItems} public feed item(s); ${idToPublicDownloadUrl.size} downloadable video(s) indexed.`);
