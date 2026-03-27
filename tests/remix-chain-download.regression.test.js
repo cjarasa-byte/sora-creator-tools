@@ -38,6 +38,30 @@ test('remix relation helpers track parent/child remix links', () => {
   assert.deepEqual(Array.from(api.getKnownRemixChildren('s_parent')).sort(), ['s_child_a', 's_child_b']);
 });
 
+test('getItemId accepts long bare post ids from tree children payloads', () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const normalizeStart = src.indexOf('  const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();');
+  const extractStart = src.indexOf('  const getItemId = (item) => {');
+  const extractEnd = src.indexOf('  function extractPostIdFromHref(href) {', extractStart);
+  assert.notEqual(normalizeStart, -1, 'normalizeId start not found');
+  assert.notEqual(extractStart, -1, 'getItemId start not found');
+  assert.notEqual(extractEnd, -1, 'getItemId end not found');
+
+  const context = vm.createContext({});
+  vm.runInContext(
+    `${src.slice(normalizeStart, extractStart)}\n${src.slice(extractStart, extractEnd)}\n` +
+      'globalThis.__fn = getItemId;',
+    context,
+    { filename: 'inject-get-item-id-bare.harness.js' }
+  );
+
+  const getItemId = context.__fn;
+  assert.equal(
+    getItemId({ post: { id: '69c58e53fad8819193010996216a8cfc', parent_post_id: 's_69c574611d308191b6cd6fb0438385b5' } }),
+    '69c58e53fad8819193010996216a8cfc'
+  );
+});
+
 test('buildRemixChainDownloadCandidates follows parent and child remix graph', async () => {
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
   const logStart = src.indexOf('  function remixChainLog(event, details) {');
