@@ -80,6 +80,8 @@
   const idToPrompt = new Map(); // Draft prompt text
   const idToDownloadUrl = new Map(); // Draft downloadable URL
   const idToPublicDownloadUrl = new Map(); // Public post downloadable URL (best-effort)
+  const idToParentPostId = new Map(); // Post parent mapping for remix-chain traversal
+  const idToAncestorPostIds = new Map(); // Post -> ancestor IDs from detail payloads
   const idToViolation = new Map(); // Draft content violation status
   const idToRemixTarget = new Map(); // Draft remix target post ID (if it's a remix of a post)
   const idToRemixTargetDraft = new Map(); // Draft remix target draft ID (if it's a remix of a draft)
@@ -315,6 +317,7 @@
   let bookmarksFilterState = 0;
   let bookmarksBtn = null;
   let publicBulkDownloadBtn = null;
+  let remixChainDownloadBtn = null;
 
   // Dashboard injection perf guards
   let dashboardBtnEl = null;
@@ -3094,6 +3097,22 @@ function badgeEmojiFor(id, meta) {
       });
     };
     buttonRow.appendChild(publicBulkDownloadBtn);
+
+    // Remix chain download (Post details for remixed videos)
+    remixChainDownloadBtn = document.createElement('button');
+    makePill(remixChainDownloadBtn, 'Chain DL');
+    remixChainDownloadBtn.classList.add('sora-uv-remix-chain-download-btn');
+    remixChainDownloadBtn.style.display = 'none';
+    remixChainDownloadBtn.onclick = () => {
+      if (remixChainDownloadBtn.disabled) return;
+      downloadCurrentRemixChain().catch((err) => {
+        console.error('[SoraUV] Remix chain download error:', err);
+        if (remixChainDownloadBtn?.setLabel) remixChainDownloadBtn.setLabel('Chain DL');
+        if (remixChainDownloadBtn?.setActive) remixChainDownloadBtn.setActive(false);
+        if (remixChainDownloadBtn) remixChainDownloadBtn.disabled = false;
+      });
+    };
+    buttonRow.appendChild(remixChainDownloadBtn);
 
     // Bookmarks (Drafts only; visibility handled later)
     const bookmarksContainer = document.createElement('div');
@@ -6018,6 +6037,8 @@ async function renderAnalyzeTable(force = false) {
         }
       }
       const p = it?.post || it || {};
+      const parentPostId = typeof p?.parent_post_id === 'string' ? p.parent_post_id.trim() : '';
+      if (parentPostId) idToParentPostId.set(id, parentPostId);
       const created_at =
         p?.created_at ?? p?.uploaded_at ?? p?.createdAt ?? p?.created ?? p?.posted_at ?? p?.timestamp ?? null;
       const caption =
@@ -6230,6 +6251,8 @@ async function renderAnalyzeTable(force = false) {
           const remixSpecialCharacter = getSpecialCharacter(remixItem);
           
           const remixP = remixItem?.post || remixItem || {};
+          const remixParentPostId = typeof remixP?.parent_post_id === 'string' ? remixP.parent_post_id.trim() : '';
+          if (remixParentPostId) idToParentPostId.set(remixId, remixParentPostId);
           const remixCreatedAt = remixP?.created_at ?? remixP?.uploaded_at ?? remixP?.createdAt ?? remixP?.created ?? remixP?.posted_at ?? remixP?.timestamp ?? null;
           const remixCaption = (typeof remixP?.caption === 'string' && remixP.caption) ? remixP.caption : (typeof remixP?.text === 'string' && remixP.text ? remixP.text : null);
           const remixAgeMin = minutesSince(remixCreatedAt);
@@ -6368,6 +6391,14 @@ async function renderAnalyzeTable(force = false) {
     // Structure: { post: {...}, profile: {...}, remix_posts: {items: [...]}, ancestors: {items: [...]}, parent_post: {...}, children: {items: [...]} }
     
     const mainPostId = json?.post?.id;
+    const ancestorIds = Array.isArray(json?.ancestors?.items)
+      ? json.ancestors.items.map((item) => getItemId(item)).filter((id) => typeof id === 'string' && id)
+      : [];
+    if (mainPostId) {
+      if (ancestorIds.length > 0) idToAncestorPostIds.set(mainPostId, ancestorIds);
+      const parentIdFromPayload = typeof json?.post?.parent_post_id === 'string' ? json.post.parent_post_id.trim() : '';
+      if (parentIdFromPayload) idToParentPostId.set(mainPostId, parentIdFromPayload);
+    }
     const currentSid = currentSIdFromURL();
     const isCurrentPost = !!(mainPostId && currentSid && mainPostId === currentSid);
     if (mainPostId && processedPostDetailIds.has(mainPostId) && isCurrentPost) {
@@ -6460,6 +6491,7 @@ async function renderAnalyzeTable(force = false) {
       // Re-enable rendering and trigger a single render with all data loaded
       suppressDetailBadgeRender = false;
       renderDetailBadge();
+      updateControlsVisibility();
       dlog('feed', 'processPostDetailJson complete, rendered badges');
     }
   }
@@ -7494,6 +7526,12 @@ async function renderAnalyzeTable(force = false) {
       publicBulkDownloadBtn.style.display = showPublicBulkDownload ? '' : 'none';
     }
 
+    if (remixChainDownloadBtn) {
+      const sid = currentSIdFromURL();
+      const hasKnownChain = !!(sid && listRemixChainPostIds(sid).length > 1);
+      remixChainDownloadBtn.style.display = isPost() && hasKnownChain ? '' : 'none';
+    }
+
     // Bookmarks button only on Drafts page
     if (bookmarksBtn) bookmarksBtn.style.display = isDrafts() ? '' : 'none';
 
@@ -7923,6 +7961,83 @@ async function renderAnalyzeTable(force = false) {
         if (tsA !== tsB) return tsA - tsB;
         return a.postId.localeCompare(b.postId);
       });
+  }
+
+  function listRemixChainPostIds(postId) {
+    const startId = String(postId || '').trim();
+    if (!startId) return [];
+    const knownAncestors = idToAncestorPostIds.get(startId);
+    if (Array.isArray(knownAncestors) && knownAncestors.length > 0) {
+      const deduped = [];
+      const seen = new Set();
+      for (const id of [...knownAncestors, startId]) {
+        const normalized = String(id || '').trim();
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        deduped.push(normalized);
+      }
+      return deduped;
+    }
+
+    const chain = [];
+    const seen = new Set();
+    let cursor = startId;
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      chain.push(cursor);
+      const parentId = String(idToParentPostId.get(cursor) || '').trim();
+      if (!parentId) break;
+      cursor = parentId;
+    }
+    return chain.reverse();
+  }
+
+  function listRemixChainDownloadCandidates(postId) {
+    const chainIds = listRemixChainPostIds(postId);
+    if (chainIds.length <= 1) return [];
+    const seenAssetKeys = new Set();
+    return chainIds
+      .map((id, index) => {
+        const url = String(idToPublicDownloadUrl.get(id) || '').trim();
+        const assetKey = normalizeDownloadAssetKey(url);
+        return { postId: id, url, assetKey, index };
+      })
+      .filter((candidate) => {
+        if (!candidate.url || !candidate.assetKey) return false;
+        if (seenAssetKeys.has(candidate.assetKey)) return false;
+        seenAssetKeys.add(candidate.assetKey);
+        return true;
+      });
+  }
+
+  async function downloadCurrentRemixChain() {
+    const sid = currentSIdFromURL();
+    if (!sid || !isPost()) return;
+    await fetchPostDataIfNeeded({ forceDetail: true, sidOverride: sid });
+
+    const candidates = listRemixChainDownloadCandidates(sid);
+    if (candidates.length <= 1) {
+      alert('No remix chain with downloadable videos was found for this post yet.');
+      return;
+    }
+    if (!confirm(`Download ${candidates.length} video(s) from this remix chain?`)) return;
+
+    const chainIds = listRemixChainPostIds(sid);
+    const chainSlug = sanitizeDownloadPathPart(`${chainIds[0]}_to_${chainIds[chainIds.length - 1]}`, 'remix-chain');
+    if (remixChainDownloadBtn?.setLabel) remixChainDownloadBtn.setLabel(`Chain ${candidates.length}...`);
+    if (remixChainDownloadBtn?.setActive) remixChainDownloadBtn.setActive(true);
+    if (remixChainDownloadBtn) remixChainDownloadBtn.disabled = true;
+
+    for (const candidate of candidates) {
+      const sequence = String(candidate.index + 1).padStart(2, '0');
+      const filename = `remix_chains/${chainSlug}/${sequence}_${candidate.postId}.mp4`;
+      await requestBackgroundDownload(candidate.url, filename);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+
+    if (remixChainDownloadBtn?.setLabel) remixChainDownloadBtn.setLabel('Chain DL');
+    if (remixChainDownloadBtn?.setActive) remixChainDownloadBtn.setActive(false);
+    if (remixChainDownloadBtn) remixChainDownloadBtn.disabled = false;
   }
 
   async function bulkDownloadPublicPosts() {
