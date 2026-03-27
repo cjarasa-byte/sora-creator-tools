@@ -40,12 +40,19 @@ test('remix relation helpers track parent/child remix links', () => {
 
 test('buildRemixChainDownloadCandidates follows parent and child remix graph', async () => {
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
-  const buildStart = src.indexOf('  async function buildRemixChainDownloadCandidates(originPostId) {');
+  const logStart = src.indexOf('  function remixChainLog(event, details) {');
+  const buildStart = src.indexOf('  async function buildRemixChainDownloadCandidates(originPostId, opts = {}) {');
+  const helperStart = src.indexOf('  async function fetchParentTreeForRemixChain(originPostId, opts = {}) {');
   const buildEnd = src.indexOf('  async function bulkDownloadRemixChain(originPostId) {', buildStart);
+  assert.notEqual(logStart, -1, 'remixChainLog start not found');
+  assert.notEqual(helperStart, -1, 'fetchParentTreeForRemixChain start not found');
   assert.notEqual(buildStart, -1, 'buildRemixChainDownloadCandidates start not found');
   assert.notEqual(buildEnd, -1, 'buildRemixChainDownloadCandidates end not found');
 
   const context = vm.createContext({
+    REMIX_CHAIN_LOG_PREFIX: '[SoraUV][RemixChain]',
+    console: { info: () => {}, error: () => {} },
+    location: { origin: 'https://sora.chatgpt.com' },
     remixParentByPostId: new Map(),
     idToPublicDownloadUrl: new Map([
       ['s_a', 'https://videos.openai.com/a.mp4'],
@@ -64,6 +71,10 @@ test('buildRemixChainDownloadCandidates follows parent and child remix graph', a
     resolvePostedTimestampMs: (id) => ({ s_a: 1, s_b: 2, s_c: 3, s_d: 4 }[id] || 0),
     setTimeout,
     remixChildrenByPostId: new Map(),
+    looksLikePostDetail: () => false,
+    processPostDetailJson: () => {},
+    fetch: async () => ({ ok: false, status: 404, json: async () => ({}) }),
+    isKnownRemixPost: (id) => context.remixParentByPostId.has(id) || ((context.remixChildrenByPostId.get(id) || new Set()).size > 0),
   });
 
   context.fetchPostDetailForChain = async (id) => {
@@ -77,7 +88,7 @@ test('buildRemixChainDownloadCandidates follows parent and child remix graph', a
     return true;
   };
 
-  vm.runInContext(`${src.slice(buildStart, buildEnd)}\nglobalThis.__fn = buildRemixChainDownloadCandidates;`, context, {
+  vm.runInContext(`${src.slice(logStart, buildEnd)}\nglobalThis.__fn = buildRemixChainDownloadCandidates;`, context, {
     filename: 'inject-remix-chain-candidates.harness.js',
   });
 

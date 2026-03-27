@@ -320,6 +320,7 @@
   let remixChainDownloadBtn = null;
   let remixChainDownloadInFlight = false;
   let remixChainProbeAtMs = 0;
+  const REMIX_CHAIN_LOG_PREFIX = '[SoraUV][RemixChain]';
 
   // Dashboard injection perf guards
   let dashboardBtnEl = null;
@@ -467,7 +468,6 @@
       || p.startsWith('/d/')
       || p === '/de'
       || p.startsWith('/de/')
-      || p.startsWith('/p/')
       || p.startsWith('/e/');
   };
 
@@ -8007,9 +8007,79 @@ async function renderAnalyzeTable(force = false) {
     return false;
   }
 
-  async function buildRemixChainDownloadCandidates(originPostId) {
+  function remixChainLog(event, details) {
+    try {
+      if (details === undefined) {
+        console.info(`${REMIX_CHAIN_LOG_PREFIX} ${event}`);
+      } else {
+        console.info(`${REMIX_CHAIN_LOG_PREFIX} ${event}`, details);
+      }
+    } catch {}
+  }
+
+  async function fetchParentTreeForRemixChain(originPostId, opts = {}) {
+    const originId = typeof originPostId === 'string' ? normalizeId(originPostId) : '';
+    if (!originId) return false;
+    const scope = opts?.treeScope === 'current' ? 'current' : 'root';
+    let rootId = originId;
+    if (scope === 'root') {
+      const seen = new Set();
+      for (let hop = 0; hop < 12; hop += 1) {
+        if (!rootId || seen.has(rootId)) break;
+        seen.add(rootId);
+        await fetchPostDetailForChain(rootId);
+        const parentId = normalizeId(remixParentByPostId.get(rootId));
+        if (!parentId || parentId === rootId) break;
+        rootId = parentId;
+      }
+    }
+
+    const treeUrls = [
+      `${location.origin}/backend/project_y/post/${rootId}/tree?limit=500&max_depth=100`,
+      `${location.origin}/backend/project_y/post/${rootId}/tree?limit=20&max_depth=1`,
+      `${location.origin}/posts/${rootId}/tree?limit=500&max_depth=100`,
+      `${location.origin}/posts/${rootId}/tree`,
+    ];
+
+    remixChainLog('tree_fetch_start', { originId, rootId, scope, urls: treeUrls.length });
+    for (const treeUrl of treeUrls) {
+      try {
+        const res = await fetch(treeUrl, {
+          method: 'GET',
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+        });
+        if (!res.ok) {
+          remixChainLog('tree_fetch_non_ok', { url: treeUrl, status: res.status });
+          continue;
+        }
+        const json = await res.json();
+        if (!looksLikePostDetail(json)) {
+          remixChainLog('tree_fetch_unrecognized_payload', { url: treeUrl });
+          continue;
+        }
+        processPostDetailJson(json);
+        remixChainLog('tree_fetch_success', {
+          url: treeUrl,
+          postId: json?.post?.id || null,
+          children: Array.isArray(json?.children?.items) ? json.children.items.length : 0,
+          remixes: Array.isArray(json?.remix_posts?.items) ? json.remix_posts.items.length : 0,
+        });
+        return true;
+      } catch (err) {
+        remixChainLog('tree_fetch_error', { url: treeUrl, message: String(err?.message || err || 'unknown') });
+      }
+    }
+    remixChainLog('tree_fetch_failed', { originId, rootId, scope });
+    return false;
+  }
+
+  async function buildRemixChainDownloadCandidates(originPostId, opts = {}) {
     const originId = typeof originPostId === 'string' ? normalizeId(originPostId) : '';
     if (!originId) return [];
+    const treeScope = opts?.treeScope === 'current' ? 'current' : 'root';
+    remixChainLog('candidate_scan_start', { originId, treeScope });
+    await fetchParentTreeForRemixChain(originId, { treeScope });
     const visited = new Set();
     const queue = [originId];
     const maxNodes = 250;
@@ -8035,7 +8105,7 @@ async function renderAnalyzeTable(force = false) {
     const downloadedIds = getPublicDownloadedIds();
     const downloadedAssetKeys = getPublicDownloadedAssetKeys();
     const seenAssetKeys = new Set();
-    return Array.from(visited)
+    const rows = Array.from(visited)
       .map((postId) => {
         const url = String(idToPublicDownloadUrl.get(postId) || '').trim();
         return { postId, url, assetKey: normalizeDownloadAssetKey(url) };
@@ -8052,6 +8122,14 @@ async function renderAnalyzeTable(force = false) {
         if (tsA !== tsB) return tsA - tsB;
         return a.postId.localeCompare(b.postId);
       });
+    remixChainLog('candidate_scan_complete', {
+      originId,
+      treeScope,
+      visitedNodes: visited.size,
+      downloadable: rows.length,
+    });
+    if (!rows.length) remixChainLog('candidate_scan_empty', { originId, treeScope, knownGraph: isKnownRemixPost(originId) });
+    return rows;
   }
 
   async function bulkDownloadRemixChain(originPostId) {
@@ -8064,14 +8142,24 @@ async function renderAnalyzeTable(force = false) {
       if (remixChainDownloadBtn?.setActive) remixChainDownloadBtn.setActive(true);
       if (remixChainDownloadBtn) remixChainDownloadBtn.disabled = true;
 
-      const candidates = await buildRemixChainDownloadCandidates(originId);
+      let treeScope = 'root';
+      try {
+        const scopeRaw = prompt('Chain download scope: type "root" for full parent tree (default), or "current" for only this post tree.', 'root');
+        if (scopeRaw == null) return;
+        if (String(scopeRaw || '').trim().toLowerCase() === 'current') treeScope = 'current';
+      } catch {}
+      remixChainLog('download_scope_selected', { originId, treeScope });
+
+      const candidates = await buildRemixChainDownloadCandidates(originId, { treeScope });
       if (!candidates.length) {
+        remixChainLog('download_none_found', { originId, treeScope });
         alert('No new downloadable videos found in this remix chain.');
         return;
       }
       if (!confirm(`Download ${candidates.length} video(s) from this remix chain?`)) return;
 
       if (remixChainDownloadBtn?.setLabel) remixChainDownloadBtn.setLabel(`Chain ${candidates.length}...`);
+      remixChainLog('download_start', { originId, treeScope, count: candidates.length });
       for (const candidate of candidates) {
         try {
           const filename = buildPublicDownloadPath(candidate.postId);
@@ -8079,8 +8167,13 @@ async function renderAnalyzeTable(force = false) {
           if (!ok) continue;
           markPublicPostDownloaded(candidate.postId);
           markPublicAssetDownloaded(candidate.assetKey);
+          remixChainLog('download_ok', { postId: candidate.postId, filename });
         } catch (err) {
           console.error('[SoraUV] Remix chain download failed:', candidate.postId, err);
+          remixChainLog('download_error', {
+            postId: candidate.postId,
+            message: String(err?.message || err || 'unknown'),
+          });
         }
         await new Promise((resolve) => setTimeout(resolve, 120));
       }
@@ -8106,6 +8199,13 @@ async function renderAnalyzeTable(force = false) {
     }
     const show = isPost() && hasSid;
     remixChainDownloadBtn.style.display = show ? '' : 'none';
+    if (show && remixChainDownloadBtn.dataset.lastVisibleSid !== sid) {
+      remixChainDownloadBtn.dataset.lastVisibleSid = sid;
+      remixChainLog('button_visible', { sid, knownGraph: isKnownRemixPost(sid) });
+    }
+    if (!show) {
+      remixChainDownloadBtn.dataset.lastVisibleSid = '';
+    }
     if (!show) {
       remixChainDownloadBtn.disabled = true;
       return;
