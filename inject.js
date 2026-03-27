@@ -8104,7 +8104,7 @@ async function renderAnalyzeTable(force = false) {
         fetchPostDetailOnce(sid);
       }
     }
-    const show = isPost() && hasSid && isKnownRemixPost(sid);
+    const show = isPost() && hasSid;
     remixChainDownloadBtn.style.display = show ? '' : 'none';
     if (!show) {
       remixChainDownloadBtn.disabled = true;
