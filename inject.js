@@ -499,6 +499,20 @@
     publicHydrationStatusTextEl.textContent = String(opts.text || '');
   }
 
+  function buildBackendJsonHeaders(extraHeaders = null) {
+    const headers = { Accept: 'application/json' };
+    if (typeof capturedAuthToken === 'string' && capturedAuthToken.startsWith('Bearer ')) {
+      headers.Authorization = capturedAuthToken;
+    }
+    if (extraHeaders && typeof extraHeaders === 'object') {
+      for (const [key, value] of Object.entries(extraHeaders)) {
+        if (value == null) continue;
+        headers[key] = value;
+      }
+    }
+    return headers;
+  }
+
   async function fetchProfilePostCountEstimate() {
     const count = Number(profilePostCountEstimate);
     if (!Number.isFinite(count) || count < 0) return null;
@@ -8464,7 +8478,7 @@ async function renderAnalyzeTable(force = false) {
         const response = await fetch(url, {
           method: 'GET',
           credentials: 'include',
-          headers: { Accept: 'application/json' },
+          headers: buildBackendJsonHeaders(),
         });
         if (!response.ok) break;
         const contentType = String(response.headers.get('content-type') || '').toLowerCase();
