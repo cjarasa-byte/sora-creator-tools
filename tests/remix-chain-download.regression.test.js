@@ -113,6 +113,7 @@ test('buildRemixChainDownloadCandidates follows parent and child remix graph', a
       const set = context.remixChildrenByPostId.get(id);
       return set ? Array.from(set) : [];
     },
+    currentPublicDownloadScopeKey: () => 'profile:test',
     getPublicDownloadedIds: () => new Set(['s_d']),
     getPublicDownloadedAssetKeys: () => new Set(),
     normalizeDownloadAssetKey: (url) => url,

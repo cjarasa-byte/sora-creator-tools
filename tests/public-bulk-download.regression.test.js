@@ -43,6 +43,7 @@ function loadInjectPublicHelpers() {
     idToMeta: new Map(),
     getPublicDownloadedIds: () => new Set(),
     getPublicDownloadedAssetKeys: () => new Set(),
+    currentPublicDownloadScopeKey: () => 'profile:test',
   });
   vm.runInContext(`${snippet}\nglobalThis.__api = { extractPostIdFromHref, resolvePublicDownloadUrl, listPublicBulkDownloadCandidates };`, context, {
     filename: 'inject-public-bulk-download.harness.js',
@@ -78,7 +79,7 @@ test('buildPublicDownloadPath uses username/date/character/post-id.mp4 structure
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
   const sanitizeStart = src.indexOf('  function sanitizeDownloadPathPart(value, fallback = \'unknown\') {');
   const sanitizeEnd = src.indexOf('  function resolvePostedTimestampMs(id) {', sanitizeStart);
-  const buildStart = src.indexOf('  function buildPublicDownloadPath(postId) {');
+  const buildStart = src.indexOf('  function buildPublicDownloadPaths(postId) {');
   const buildEnd = src.indexOf('  async function requestBackgroundDownload(url, filename, timeoutMs = 15000) {', buildStart);
   assert.notEqual(sanitizeStart, -1, 'sanitizeDownloadPathPart start not found');
   assert.notEqual(sanitizeEnd, -1, 'sanitizeDownloadPathPart end not found');
@@ -105,13 +106,17 @@ test('buildPublicDownloadPath uses username/date/character/post-id.mp4 structure
     ]),
   });
   const snippet = `${src.slice(sanitizeStart, sanitizeEnd)}\n${src.slice(buildStart, buildEnd)}`;
-  vm.runInContext(`${snippet}\nglobalThis.__fn = buildPublicDownloadPath;`, context, {
+  vm.runInContext(`${snippet}\nglobalThis.__fn = buildPublicDownloadPath; globalThis.__paths = buildPublicDownloadPaths;`, context, {
     filename: 'inject-public-bulk-download-path.harness.js',
   });
   assert.equal(context.__fn('s_char'), 'alice/2026-03-26/Hero_Prime/s_char.mp4');
   assert.equal(context.__fn('s_plain'), 'alice/2026-03-26/s_plain.mp4');
   assert.equal(context.__fn('s_multi'), 'alice/2026-03-26/Atlas__Hero_Prime__Nova/s_multi.mp4');
   assert.equal(context.__fn('s_profile'), 'buckleybunny/creatorz/2026-03-26/Night_Rider/s_profile.mp4');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.__paths('s_profile'))), [
+    'buckleybunny/creatorz/2026-03-26/Night_Rider/s_profile.mp4',
+    'creatorz/2026-03-26/Night_Rider/s_profile.mp4',
+  ]);
 });
 
 test('listPublicBulkDownloadCandidates includes indexed posts beyond currently visible cards', () => {
@@ -135,6 +140,7 @@ test('listPublicBulkDownloadCandidates includes indexed posts beyond currently v
     ]),
     getPublicDownloadedIds: () => new Set(['s_b']),
     getPublicDownloadedAssetKeys: () => new Set(),
+    currentPublicDownloadScopeKey: () => 'profile:creatorz',
     resolvePostedTimestampMs: (id) => {
       const meta = context.idToMeta.get(id);
       return Number.isFinite(meta?.createdAtMs) ? meta.createdAtMs : null;
@@ -167,6 +173,7 @@ test('listPublicBulkDownloadCandidates deduplicates by canonical asset URL', () 
     ]),
     getPublicDownloadedIds: () => new Set(),
     getPublicDownloadedAssetKeys: () => new Set(),
+    currentPublicDownloadScopeKey: () => 'profile:creatorz',
     normalizeDownloadAssetKey: (url) => String(url).split('?')[0].toLowerCase(),
     resolvePostedTimestampMs: () => 0,
   });
@@ -178,6 +185,40 @@ test('listPublicBulkDownloadCandidates deduplicates by canonical asset URL', () 
     { postId: 's_1', url: 'https://videos.openai.com/shared.mp4?token=aaa', assetKey: 'https://videos.openai.com/shared.mp4' },
     { postId: 's_3', url: 'https://videos.openai.com/other.mp4', assetKey: 'https://videos.openai.com/other.mp4' },
   ]);
+});
+
+test('listPublicBulkDownloadCandidates scopes downloaded-history checks to the active page', () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const listCandidatesStart = src.indexOf('  function listPublicBulkDownloadCandidates() {');
+  const listCandidatesEnd = src.indexOf('  async function bulkDownloadPublicPosts() {', listCandidatesStart);
+  assert.notEqual(listCandidatesStart, -1, 'listPublicBulkDownloadCandidates start not found');
+  assert.notEqual(listCandidatesEnd, -1, 'listPublicBulkDownloadCandidates end not found');
+  const snippet = src.slice(listCandidatesStart, listCandidatesEnd);
+
+  const scopesSeen = [];
+  const context = vm.createContext({
+    idToPublicDownloadUrl: new Map([
+      ['s_shared', 'https://videos.openai.com/shared.mp4'],
+      ['s_local', 'https://videos.openai.com/local.mp4'],
+    ]),
+    getPublicDownloadedIds: (scopeKey) => {
+      scopesSeen.push(scopeKey);
+      if (scopeKey === 'profile:wilson_weasel') return new Set(['s_local']);
+      return new Set(['s_shared']);
+    },
+    getPublicDownloadedAssetKeys: () => new Set(),
+    currentPublicDownloadScopeKey: () => 'profile:wilson_weasel',
+    normalizeDownloadAssetKey: (url) => url,
+    resolvePostedTimestampMs: () => 0,
+  });
+  vm.runInContext(`${snippet}\nglobalThis.__fn = listPublicBulkDownloadCandidates;`, context, {
+    filename: 'inject-public-bulk-download-scope.harness.js',
+  });
+  const result = JSON.parse(JSON.stringify(context.__fn()));
+  assert.deepEqual(result, [
+    { postId: 's_shared', url: 'https://videos.openai.com/shared.mp4', assetKey: 'https://videos.openai.com/shared.mp4' },
+  ]);
+  assert.deepEqual(scopesSeen, ['profile:wilson_weasel']);
 });
 
 test('profileFeedCutForUserId uses appearances for character IDs and nf2 for user IDs', () => {
