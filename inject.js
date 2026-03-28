@@ -499,6 +499,7 @@
     const m = location.pathname.match(/^\/profile\/(?:username\/)?([^\/?#]+)/i);
     return m ? m[1] : null;
   }
+
   function currentPublicIndexScopeKey() {
     try {
       const u = new URL(location.href);
@@ -8240,26 +8241,13 @@ async function renderAnalyzeTable(force = false) {
       if (folderNames.length <= 0) return `${basePath}/${videoFilename}`;
       return `${basePath}/${folderNames.join('__')}/${videoFilename}`;
     };
-    const creatorBase = `${creatorUser}/${datePart}`;
-    const creatorPath = withCharacter(creatorBase);
-    const paths = [];
-    const rootHasDistinctCreator =
+    const hasDistinctRoot =
       !!meta.profileRootHandle &&
       rootUser.toLowerCase() !== creatorUser.toLowerCase();
-    if (rootHasDistinctCreator) {
-      paths.push(withCharacter(`${rootUser}/${creatorUser}/${datePart}`));
-      paths.push(creatorPath);
-    } else {
-      paths.push(withCharacter(`${creatorUser}/${datePart}`));
-      if (!meta.profileRootHandle) paths.push(creatorPath);
-    }
-    const seenPaths = new Set();
-    return paths.filter((path) => {
-      const key = String(path || '').trim();
-      if (!key || seenPaths.has(key)) return false;
-      seenPaths.add(key);
-      return true;
-    });
+    const basePath = hasDistinctRoot
+      ? `${rootUser}/${creatorUser}/${datePart}`
+      : `${creatorUser}/${datePart}`;
+    return [withCharacter(basePath)];
   }
 
   function buildPublicDownloadPath(postId) {
