@@ -43,6 +43,7 @@
   const ANALYZE_VISITED_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
   const BOOKMARKS_KEY = 'SORA_UV_BOOKMARKS_V1';
   const PUBLIC_DOWNLOADS_KEY = 'SORA_UV_PUBLIC_DOWNLOADS_V1';
+  const PUBLIC_DOWNLOADS_SCOPED_KEY = 'SORA_UV_PUBLIC_DOWNLOADS_V2';
   const UV_DRAFTS_DB_NAME = 'SORA_UV_DRAFTS_CACHE';
   const TASK_TO_DRAFT_KEY = 'SORA_UV_TASK_TO_DRAFT_V1'; // task_id -> source draft ID for draft remixes
   const VIDEO_GENS_BALANCE_KEY = 'SCT_VIDEO_GENS_BALANCE_V1';
@@ -515,6 +516,11 @@
     } catch {
       return `${location.pathname || ''}?${location.search || ''}`;
     }
+  }
+  function currentPublicDownloadScopeKey() {
+    const scopeKey = currentPublicIndexScopeKey();
+    if (typeof scopeKey === 'string' && scopeKey) return scopeKey;
+    return `${location.pathname || ''}?${location.search || ''}`;
   }
   function resetPublicVideoIndexCache() {
     idToPublicDownloadUrl.clear();
@@ -7916,38 +7922,67 @@ async function renderAnalyzeTable(force = false) {
     localStorage.setItem(PREF_KEY, JSON.stringify(p));
   }
 
-  function getPublicDownloadedIds() {
+  function readScopedPublicDownloads() {
     try {
-      const data = JSON.parse(localStorage.getItem(PUBLIC_DOWNLOADS_KEY) || '{}');
-      const ids = Array.isArray(data.ids) ? data.ids : [];
+      const data = JSON.parse(localStorage.getItem(PUBLIC_DOWNLOADS_SCOPED_KEY) || '{}');
+      const scopes = data && typeof data.scopes === 'object' && data.scopes ? data.scopes : {};
+      return scopes;
+    } catch {
+      return {};
+    }
+  }
+
+  function readScopedDownloadBucket(scopeKey) {
+    const scope = String(scopeKey || currentPublicDownloadScopeKey() || '').trim();
+    if (!scope) return { ids: [], assets: [] };
+    const scopes = readScopedPublicDownloads();
+    const bucket = scopes && typeof scopes[scope] === 'object' && scopes[scope] ? scopes[scope] : {};
+    const ids = Array.isArray(bucket.ids) ? bucket.ids : [];
+    const assets = Array.isArray(bucket.assets) ? bucket.assets : [];
+    return { ids, assets };
+  }
+
+  function writeScopedDownloadBucket(scopeKey, updater) {
+    const scope = String(scopeKey || currentPublicDownloadScopeKey() || '').trim();
+    if (!scope) return;
+    const scopes = readScopedPublicDownloads();
+    const currentBucket = readScopedDownloadBucket(scope);
+    const nextBucket = typeof updater === 'function' ? updater(currentBucket) : currentBucket;
+    scopes[scope] = {
+      ids: Array.isArray(nextBucket?.ids) ? nextBucket.ids : [],
+      assets: Array.isArray(nextBucket?.assets) ? nextBucket.assets : [],
+    };
+    try {
+      localStorage.setItem(PUBLIC_DOWNLOADS_SCOPED_KEY, JSON.stringify({ scopes }));
+    } catch {}
+  }
+
+  function getPublicDownloadedIds(scopeKey = null) {
+    try {
+      const bucket = readScopedDownloadBucket(scopeKey);
+      const ids = Array.isArray(bucket.ids) ? bucket.ids : [];
       return new Set(ids.map((id) => String(id || '').trim()).filter(Boolean));
     } catch {
       return new Set();
     }
   }
 
-  function getPublicDownloadedAssetKeys() {
+  function getPublicDownloadedAssetKeys(scopeKey = null) {
     try {
-      const data = JSON.parse(localStorage.getItem(PUBLIC_DOWNLOADS_KEY) || '{}');
-      const assets = Array.isArray(data.assets) ? data.assets : [];
+      const bucket = readScopedDownloadBucket(scopeKey);
+      const assets = Array.isArray(bucket.assets) ? bucket.assets : [];
       return new Set(assets.map((asset) => String(asset || '').trim()).filter(Boolean));
     } catch {
       return new Set();
     }
   }
 
-  function setPublicDownloadedIds(idsSet) {
-    try {
-      const existingAssets = Array.from(getPublicDownloadedAssetKeys());
-      localStorage.setItem(PUBLIC_DOWNLOADS_KEY, JSON.stringify({ ids: Array.from(idsSet || []), assets: existingAssets }));
-    } catch {}
+  function setPublicDownloadedIds(idsSet, scopeKey = null) {
+    writeScopedDownloadBucket(scopeKey, (bucket) => ({ ids: Array.from(idsSet || []), assets: Array.from(bucket.assets || []) }));
   }
 
-  function setPublicDownloadedAssetKeys(assetSet) {
-    try {
-      const existingIds = Array.from(getPublicDownloadedIds());
-      localStorage.setItem(PUBLIC_DOWNLOADS_KEY, JSON.stringify({ ids: existingIds, assets: Array.from(assetSet || []) }));
-    } catch {}
+  function setPublicDownloadedAssetKeys(assetSet, scopeKey = null) {
+    writeScopedDownloadBucket(scopeKey, (bucket) => ({ ids: Array.from(bucket.ids || []), assets: Array.from(assetSet || []) }));
   }
 
   async function clearUVDraftsIndexedDBCache() {
@@ -8009,6 +8044,7 @@ async function renderAnalyzeTable(force = false) {
 
   async function purgeClientDownloadHistory() {
     try { localStorage.removeItem(PUBLIC_DOWNLOADS_KEY); } catch {}
+    try { localStorage.removeItem(PUBLIC_DOWNLOADS_SCOPED_KEY); } catch {}
     try { await clearUVDraftsIndexedDBCache(); } catch {}
   }
 
@@ -8027,20 +8063,20 @@ async function renderAnalyzeTable(force = false) {
     purgeClientDownloadHistory();
   });
 
-  function markPublicPostDownloaded(postId) {
+  function markPublicPostDownloaded(postId, scopeKey = null) {
     const id = String(postId || '').trim();
     if (!id) return;
-    const downloaded = getPublicDownloadedIds();
+    const downloaded = getPublicDownloadedIds(scopeKey);
     downloaded.add(id);
-    setPublicDownloadedIds(downloaded);
+    setPublicDownloadedIds(downloaded, scopeKey);
   }
 
-  function markPublicAssetDownloaded(assetKey) {
+  function markPublicAssetDownloaded(assetKey, scopeKey = null) {
     const key = String(assetKey || '').trim();
     if (!key) return;
-    const downloaded = getPublicDownloadedAssetKeys();
+    const downloaded = getPublicDownloadedAssetKeys(scopeKey);
     downloaded.add(key);
-    setPublicDownloadedAssetKeys(downloaded);
+    setPublicDownloadedAssetKeys(downloaded, scopeKey);
   }
 
   function sanitizeDownloadPathPart(value, fallback = 'unknown') {
@@ -8101,7 +8137,7 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
-  function buildPublicDownloadPath(postId) {
+  function buildPublicDownloadPaths(postId) {
     const meta = idToMeta.get(postId) || {};
     const rootUser = sanitizeDownloadPathPart(meta.profileRootHandle || meta.userHandle || 'unknown-user', 'unknown-user');
     const creatorUser = sanitizeDownloadPathPart(meta.ownerHandle || meta.userHandle || 'unknown-user', 'unknown-user');
@@ -8129,21 +8165,34 @@ async function renderAnalyzeTable(force = false) {
       seenFolderNames.add(key);
       folderNames.push(sanitized);
     }
+    folderNames.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
     const videoFilename = `${postId}.mp4`;
+    const withCharacter = (basePath) => {
+      if (folderNames.length <= 0) return `${basePath}/${videoFilename}`;
+      return `${basePath}/${folderNames.join('__')}/${videoFilename}`;
+    };
+    const creatorBase = `${creatorUser}/${datePart}`;
+    const creatorPath = withCharacter(creatorBase);
+    const paths = [];
     if (meta.profileRootHandle) {
-      if (folderNames.length > 0) {
-        folderNames.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-        const characterFolder = folderNames.join('__');
-        return `${rootUser}/${creatorUser}/${datePart}/${characterFolder}/${videoFilename}`;
-      }
-      return `${rootUser}/${creatorUser}/${datePart}/${videoFilename}`;
+      paths.push(withCharacter(`${rootUser}/${creatorUser}/${datePart}`));
+      paths.push(creatorPath);
+    } else {
+      paths.push(withCharacter(`${rootUser}/${datePart}`));
+      paths.push(creatorPath);
     }
-    if (folderNames.length > 0) {
-      folderNames.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-      const characterFolder = folderNames.join('__');
-      return `${rootUser}/${datePart}/${characterFolder}/${videoFilename}`;
-    }
-    return `${rootUser}/${datePart}/${videoFilename}`;
+    const seenPaths = new Set();
+    return paths.filter((path) => {
+      const key = String(path || '').trim();
+      if (!key || seenPaths.has(key)) return false;
+      seenPaths.add(key);
+      return true;
+    });
+  }
+
+  function buildPublicDownloadPath(postId) {
+    const paths = buildPublicDownloadPaths(postId);
+    return paths[0] || `${sanitizeDownloadPathPart(postId || 'unknown', 'unknown')}.mp4`;
   }
 
   async function resolveProfileUserIdByHandle(profileHandle) {
@@ -8301,8 +8350,9 @@ async function renderAnalyzeTable(force = false) {
   }
 
   function listPublicBulkDownloadCandidates() {
-    const downloadedIds = getPublicDownloadedIds();
-    const downloadedAssetKeys = getPublicDownloadedAssetKeys();
+    const scopeKey = currentPublicDownloadScopeKey();
+    const downloadedIds = getPublicDownloadedIds(scopeKey);
+    const downloadedAssetKeys = getPublicDownloadedAssetKeys(scopeKey);
     const seenAssetKeys = new Set();
     return [...idToPublicDownloadUrl.entries()]
       .map(([postId, url]) => {
@@ -8468,8 +8518,9 @@ async function renderAnalyzeTable(force = false) {
       await new Promise((resolve) => setTimeout(resolve, 40));
     }
 
-    const downloadedIds = getPublicDownloadedIds();
-    const downloadedAssetKeys = getPublicDownloadedAssetKeys();
+    const scopeKey = currentPublicDownloadScopeKey();
+    const downloadedIds = getPublicDownloadedIds(scopeKey);
+    const downloadedAssetKeys = getPublicDownloadedAssetKeys(scopeKey);
     const seenAssetKeys = new Set();
     const rows = Array.from(visited)
       .map((postId) => {
@@ -8524,16 +8575,21 @@ async function renderAnalyzeTable(force = false) {
       }
       if (!confirm(`Download ${candidates.length} video(s) from this remix chain?`)) return;
 
+      const scopeKey = currentPublicDownloadScopeKey();
       if (remixChainDownloadBtn?.setLabel) remixChainDownloadBtn.setLabel(`Chain ${candidates.length}...`);
       remixChainLog('download_start', { originId, treeScope, count: candidates.length });
       for (const candidate of candidates) {
         try {
-          const filename = buildPublicDownloadPath(candidate.postId);
-          const ok = await requestBackgroundDownload(candidate.url, filename);
-          if (!ok) continue;
-          markPublicPostDownloaded(candidate.postId);
-          markPublicAssetDownloaded(candidate.assetKey);
-          remixChainLog('download_ok', { postId: candidate.postId, filename });
+          const filepaths = buildPublicDownloadPaths(candidate.postId);
+          let downloaded = false;
+          for (const filename of filepaths) {
+            const ok = await requestBackgroundDownload(candidate.url, filename);
+            downloaded = downloaded || ok;
+          }
+          if (!downloaded) continue;
+          markPublicPostDownloaded(candidate.postId, scopeKey);
+          markPublicAssetDownloaded(candidate.assetKey, scopeKey);
+          remixChainLog('download_ok', { postId: candidate.postId, filenames: filepaths });
         } catch (err) {
           console.error('[SoraUV] Remix chain download failed:', candidate.postId, err);
           remixChainLog('download_error', {
@@ -8601,16 +8657,21 @@ async function renderAnalyzeTable(force = false) {
     }
     if (!confirm(`Download ${candidates.length} public video(s)?`)) return;
 
+    const scopeKey = currentPublicDownloadScopeKey();
     if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel(`DL ${candidates.length}...`);
     if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
     if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
     for (const candidate of candidates) {
       try {
-        const filename = buildPublicDownloadPath(candidate.postId);
-        const ok = await requestBackgroundDownload(candidate.url, filename);
-        if (!ok) continue;
-        markPublicPostDownloaded(candidate.postId);
-        markPublicAssetDownloaded(candidate.assetKey);
+        const filepaths = buildPublicDownloadPaths(candidate.postId);
+        let downloaded = false;
+        for (const filename of filepaths) {
+          const ok = await requestBackgroundDownload(candidate.url, filename);
+          downloaded = downloaded || ok;
+        }
+        if (!downloaded) continue;
+        markPublicPostDownloaded(candidate.postId, scopeKey);
+        markPublicAssetDownloaded(candidate.assetKey, scopeKey);
       } catch (err) {
         console.error('[SoraUV] Public bulk download failed:', candidate.postId, err);
       }
