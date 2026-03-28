@@ -145,6 +145,41 @@ test('listProfileBulkDownloadCandidates gathers profile feed entries and scopes 
   assert.deepEqual(historyScopes, ['profile:alpha']);
 });
 
+test('dedupeManualListCandidates removes repeated posts/assets and caps oversized batches', () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const normalizeIdStart = src.indexOf('  const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();');
+  const normalizeIdEnd = src.indexOf('  const getUniqueViews =', normalizeIdStart);
+  const normalizeAssetStart = src.indexOf('  function normalizeDownloadAssetKey(url) {');
+  const normalizeAssetEnd = src.indexOf('  function buildPublicDownloadPath(postId) {', normalizeAssetStart);
+  const dedupeStart = src.indexOf('  function dedupeManualListCandidates(candidates, maxCandidates = 4000) {');
+  const dedupeEnd = src.indexOf('  async function bulkDownloadFromManualList() {', dedupeStart);
+  assert.notEqual(normalizeIdStart, -1, 'normalizeId start not found');
+  assert.notEqual(normalizeIdEnd, -1, 'normalizeId end not found');
+  assert.notEqual(normalizeAssetStart, -1, 'normalizeDownloadAssetKey start not found');
+  assert.notEqual(normalizeAssetEnd, -1, 'normalizeDownloadAssetKey end not found');
+  assert.notEqual(dedupeStart, -1, 'dedupeManualListCandidates start not found');
+  assert.notEqual(dedupeEnd, -1, 'dedupeManualListCandidates end not found');
+  const snippet = [
+    src.slice(normalizeIdStart, normalizeIdEnd),
+    src.slice(normalizeAssetStart, normalizeAssetEnd),
+    src.slice(dedupeStart, dedupeEnd),
+  ].join('\n');
+  const context = vm.createContext({});
+  vm.runInContext(`${snippet}\nglobalThis.__fn = dedupeManualListCandidates;`, context, {
+    filename: 'inject-public-profile-list-dedupe.harness.js',
+  });
+  const result = JSON.parse(JSON.stringify(context.__fn([
+    { postId: 's_1', url: 'https://videos.openai.com/a.mp4?token=1', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:a' },
+    { postId: 's_1', url: 'https://videos.openai.com/a.mp4?token=2', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:a' }, // duplicate post
+    { postId: 's_2', url: 'https://videos.openai.com/a.mp4?token=3', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:b' }, // duplicate asset
+    { postId: 's_3', url: 'https://videos.openai.com/c.mp4', scopeKey: 'profile:c' },
+  ], 2)));
+  assert.deepEqual(result, [
+    { postId: 's_1', url: 'https://videos.openai.com/a.mp4?token=1', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:a' },
+    { postId: 's_3', url: 'https://videos.openai.com/c.mp4', assetKey: 'https://videos.openai.com/c.mp4', scopeKey: 'profile:c' },
+  ]);
+});
+
 test('resolvePublicDownloadUrl falls back to attachment encoding source path', () => {
   const api = loadInjectPublicHelpers();
   const sample = {
