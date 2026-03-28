@@ -8784,11 +8784,19 @@ async function renderAnalyzeTable(force = false) {
       const url = new URL(feedUrlBase.toString());
       if (cursor) url.searchParams.set('cursor', cursor);
       let feedJson = null;
+      let timeoutId = null;
       try {
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        timeoutId = controller
+          ? setTimeout(() => {
+              try { controller.abort(); } catch {}
+            }, 10000)
+          : null;
         const response = await fetch(url.toString(), {
           method: 'GET',
           credentials: 'include',
           headers: buildBackendJsonHeaders(),
+          signal: controller ? controller.signal : undefined,
         });
         if (!response.ok) break;
         const contentType = String(response.headers.get('content-type') || '').toLowerCase();
@@ -8796,6 +8804,8 @@ async function renderAnalyzeTable(force = false) {
         feedJson = await response.json();
       } catch {
         break;
+      } finally {
+        if (timeoutId != null) clearTimeout(timeoutId);
       }
       processFeedJson(feedJson, { profileRootHandle: safeHandle });
       const items = Array.isArray(feedJson?.items)
@@ -8827,6 +8837,29 @@ async function renderAnalyzeTable(force = false) {
     return out;
   }
 
+  function dedupeManualListCandidates(candidates, maxCandidates = 4000) {
+    const out = [];
+    const seenPosts = new Set();
+    const seenAssets = new Set();
+    for (const candidate of (Array.isArray(candidates) ? candidates : [])) {
+      const postId = normalizeId(candidate?.postId || '');
+      const assetKey = normalizeDownloadAssetKey(candidate?.assetKey || candidate?.url || '');
+      const url = String(candidate?.url || '').trim();
+      if (!postId || !assetKey || !url) continue;
+      if (seenPosts.has(postId) || seenAssets.has(assetKey)) continue;
+      seenPosts.add(postId);
+      seenAssets.add(assetKey);
+      out.push({
+        postId,
+        url,
+        assetKey,
+        scopeKey: typeof candidate?.scopeKey === 'string' ? candidate.scopeKey : '',
+      });
+      if (out.length >= maxCandidates) break;
+    }
+    return out;
+  }
+
   async function bulkDownloadFromManualList() {
     try {
       const raw = prompt(
@@ -8844,22 +8877,40 @@ async function renderAnalyzeTable(force = false) {
       if (publicListDownloadBtn) publicListDownloadBtn.disabled = true;
       const allCandidates = [];
       const failures = [];
+      const errored = [];
       for (const profile of profiles) {
         const profileHandle = String(profile?.profileHandle || '').trim();
         if (!profileHandle) continue;
-        if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel(`@${profileHandle}...`);
-        const candidates = await listProfileBulkDownloadCandidates(profileHandle);
-        if (!candidates.length) failures.push(profileHandle);
-        allCandidates.push(...candidates);
+        try {
+          if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel(`@${profileHandle}...`);
+          const candidates = await listProfileBulkDownloadCandidates(profileHandle);
+          if (!candidates.length) failures.push(profileHandle);
+          allCandidates.push(...candidates);
+        } catch (err) {
+          console.error('[SoraUV] Failed to resolve list profile:', profileHandle, err);
+          errored.push(profileHandle);
+        }
       }
-      const candidates = allCandidates;
+      const candidates = dedupeManualListCandidates(allCandidates);
       if (!candidates.length) {
-        alert(
-          failures.length
-            ? `No new downloadable assets were found for: ${failures.join(', ')}.`
-            : 'No new downloadable assets were resolved from that list.'
-        );
+        const details = [];
+        if (failures.length) details.push(`No new downloadable assets were found for: ${failures.join(', ')}.`);
+        if (errored.length) details.push(`Some profiles failed to resolve: ${errored.join(', ')}.`);
+        alert(details.length ? details.join('\n\n') : 'No new downloadable assets were resolved from that list.');
         return;
+      }
+      if (allCandidates.length > candidates.length) {
+        console.info('[SoraUV] Manual list candidate dedupe trimmed entries:', {
+          before: allCandidates.length,
+          after: candidates.length,
+        });
+      }
+      if (candidates.length >= 4000) {
+        const continueLarge = confirm(
+          `Resolved ${candidates.length} unique downloads. Continue?\n\n` +
+          'Tip: Very large batches can make Chrome sluggish. Consider running smaller profile lists.'
+        );
+        if (!continueLarge) return;
       }
       if (!confirm(`Download ${candidates.length} item(s) across ${profiles.length} profile(s)?`)) return;
 
