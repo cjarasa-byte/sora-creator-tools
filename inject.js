@@ -8906,13 +8906,11 @@ async function renderAnalyzeTable(force = false) {
         });
       }
       if (candidates.length >= 4000) {
-        const continueLarge = confirm(
-          `Resolved ${candidates.length} unique downloads. Continue?\n\n` +
-          'Tip: Very large batches can make Chrome sluggish. Consider running smaller profile lists.'
-        );
-        if (!continueLarge) return;
+        console.info('[SoraUV] List DL auto-continuing large batch without confirmation:', {
+          count: candidates.length,
+          profiles: profiles.length,
+        });
       }
-      if (!confirm(`Download ${candidates.length} item(s) across ${profiles.length} profile(s)?`)) return;
 
       if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel(`List ${candidates.length}...`);
       for (const candidate of candidates) {
