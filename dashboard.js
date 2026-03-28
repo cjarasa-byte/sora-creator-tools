@@ -11062,12 +11062,25 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     }
 
     async function clearDownloadCache(){
-      try {
-        await chrome.runtime.sendMessage({ action: 'purge_download_history' });
-        return true;
-      } catch {
-        return false;
-      }
+      const runClear = async (action) => {
+        try {
+          const response = await chrome.runtime.sendMessage({ action });
+          return response && response.ok === true ? response : null;
+        } catch {
+          return null;
+        }
+      };
+
+      const initial = await runClear('purge_download_history');
+      if (!initial) return { ok: false, openedTab: false };
+      if (Number(initial.tabsNotified || 0) > 0) return { ok: true, openedTab: false };
+
+      const ensured = await runClear('purge_download_history_ensure_tab');
+      if (!ensured) return { ok: false, openedTab: false };
+      return {
+        ok: true,
+        openedTab: ensured.openedTab === true,
+      };
     }
 
     function resetStoredPreferences(){
@@ -11380,11 +11393,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         purgeClearDownloadCacheBtn.disabled = true;
         const originalText = purgeClearDownloadCacheBtn.textContent;
         purgeClearDownloadCacheBtn.textContent = 'Clearing…';
-        const ok = await clearDownloadCache();
-        if (ok) {
-          alert('Download cache cleared.');
+        const result = await clearDownloadCache();
+        if (result.ok) {
+          if (result.openedTab) {
+            alert('Download cache cleared.\n\nNo Sora tab was open, so one was opened in the background to apply the reset.');
+          } else {
+            alert('Download cache cleared.');
+          }
         } else {
-          alert('Unable to clear download cache right now. Please try again.');
+          alert('Unable to clear download cache right now.\n\nConsole fallback (run on https://sora.chatgpt.com):\nlocalStorage.removeItem("SORA_UV_PUBLIC_DOWNLOADS_V1"); localStorage.removeItem("SORA_UV_PUBLIC_DOWNLOADS_V2"); indexedDB.deleteDatabase("SoraUVDraftsDB");');
         }
         purgeClearDownloadCacheBtn.textContent = originalText;
         purgeClearDownloadCacheBtn.disabled = false;
