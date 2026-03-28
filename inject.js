@@ -8726,6 +8726,27 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function extractProfileHandleFromInput(input) {
+    const value = typeof input === 'string' ? input.trim() : '';
+    if (!value) return '';
+    if (/\/p\/[a-z0-9_-]+/i.test(value) || /^[sp]_[a-z0-9]{6,}$/i.test(value)) return '';
+    const normalize = (candidate) => sanitizeDownloadPathPart(candidate, '').replace(/^@+/, '');
+    if (/^https?:\/\//i.test(value)) {
+      try {
+        const parsed = new URL(value);
+        const match = String(parsed.pathname || '').match(/^\/profile\/(?:username\/)?([^/?#]+)/i);
+        return match?.[1] ? normalize(decodeURIComponent(match[1])) : '';
+      } catch {
+        return '';
+      }
+    }
+    if (value.startsWith('/')) {
+      const match = value.match(/^\/profile\/(?:username\/)?([^/?#]+)/i);
+      return match?.[1] ? normalize(decodeURIComponent(match[1])) : '';
+    }
+    return normalize(value);
+  }
+
   function parseManualPublicDownloadList(rawInput) {
     const text = typeof rawInput === 'string' ? rawInput : '';
     const rows = text
@@ -8735,46 +8756,73 @@ async function renderAnalyzeTable(force = false) {
     const seenKeys = new Set();
     const out = [];
     for (const row of rows) {
-      const fromHref = extractPostIdFromHref(row);
-      const fromId = isLikelyPostId(row) ? normalizeId(row) : null;
-      const postId = fromHref || fromId || '';
-      const isDirectUrl = /^https?:\/\//i.test(row);
-      const key = postId ? `post:${postId}` : isDirectUrl ? `url:${normalizeDownloadAssetKey(row)}` : '';
+      const profileHandle = extractProfileHandleFromInput(row);
+      const key = profileHandle ? `profile:${profileHandle.toLowerCase()}` : '';
       if (!key || seenKeys.has(key)) continue;
       seenKeys.add(key);
-      out.push({ raw: row, postId, directUrl: isDirectUrl ? row : '' });
+      out.push({ raw: row, profileHandle });
     }
     return out;
   }
 
-  async function buildManualListDownloadCandidates(entries) {
-    const scopeKey = currentPublicDownloadScopeKey();
+  async function listProfileBulkDownloadCandidates(profileHandle) {
+    const safeHandle = typeof profileHandle === 'string' ? profileHandle.trim() : '';
+    if (!safeHandle) return [];
+    const targetUserId = await resolveProfileUserIdByHandle(safeHandle);
+    if (!targetUserId) return [];
+    const scopeKey = `profile:${safeHandle.toLowerCase()}`;
     const downloadedIds = getPublicDownloadedIds(scopeKey);
     const downloadedAssetKeys = getPublicDownloadedAssetKeys(scopeKey);
     const seenAssetKeys = new Set();
+    const seenCursors = new Set();
     const out = [];
-    for (const entry of (Array.isArray(entries) ? entries : [])) {
-      const postId = typeof entry?.postId === 'string' ? entry.postId.trim() : '';
-      let url = '';
-      if (postId) {
-        url = String(idToPublicDownloadUrl.get(postId) || '').trim();
-        if (!url) {
-          await fetchPostDetailForChain(postId, { retries: 1 });
-          url = String(idToPublicDownloadUrl.get(postId) || '').trim();
-        }
-      } else if (typeof entry?.directUrl === 'string' && entry.directUrl.trim()) {
-        url = entry.directUrl.trim();
+    const feedUrlBase = new URL(`${location.origin}/backend/project_y/profile_feed/${encodeURIComponent(targetUserId)}`);
+    feedUrlBase.searchParams.set('limit', '8');
+    feedUrlBase.searchParams.set('cut', profileFeedCutForUserId(targetUserId));
+    let cursor = '';
+    while (seenCursors.size < 200) {
+      const url = new URL(feedUrlBase.toString());
+      if (cursor) url.searchParams.set('cursor', cursor);
+      let feedJson = null;
+      try {
+        const response = await fetch(url.toString(), {
+          method: 'GET',
+          credentials: 'include',
+          headers: buildBackendJsonHeaders(),
+        });
+        if (!response.ok) break;
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.includes('json')) break;
+        feedJson = await response.json();
+      } catch {
+        break;
       }
-      const assetKey = normalizeDownloadAssetKey(url);
-      if (!url || !assetKey) continue;
-      if (postId && downloadedIds.has(postId)) continue;
-      if (downloadedAssetKeys.has(assetKey) || seenAssetKeys.has(assetKey)) continue;
-      seenAssetKeys.add(assetKey);
-      out.push({
-        postId: postId || `manual_${Math.random().toString(36).slice(2, 10)}`,
-        url,
-        assetKey,
-      });
+      processFeedJson(feedJson, { profileRootHandle: safeHandle });
+      const items = Array.isArray(feedJson?.items)
+        ? feedJson.items
+        : Array.isArray(feedJson?.data?.items)
+          ? feedJson.data.items
+          : [];
+      for (const item of items) {
+        const postId = normalizeId(item?.id || item?.post?.id || item?.post_id || '');
+        if (!postId) continue;
+        let mediaUrl = String(idToPublicDownloadUrl.get(postId) || '').trim();
+        if (!mediaUrl) {
+          mediaUrl = String(resolvePublicDownloadUrl(item) || '').trim();
+          if (mediaUrl) idToPublicDownloadUrl.set(postId, mediaUrl);
+        }
+        const assetKey = normalizeDownloadAssetKey(mediaUrl);
+        if (!mediaUrl || !assetKey) continue;
+        if (downloadedIds.has(postId)) continue;
+        if (downloadedAssetKeys.has(assetKey) || seenAssetKeys.has(assetKey)) continue;
+        seenAssetKeys.add(assetKey);
+        out.push({ postId, url: mediaUrl, assetKey, scopeKey });
+      }
+      const nextCursor = detectFeedNextCursor(feedJson);
+      if (!nextCursor || seenCursors.has(nextCursor)) break;
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+      await new Promise((resolve) => setTimeout(resolve, 40));
     }
     return out;
   }
@@ -8782,26 +8830,39 @@ async function renderAnalyzeTable(force = false) {
   async function bulkDownloadFromManualList() {
     try {
       const raw = prompt(
-        'Paste one item per line: post URL (/p/...), post ID (p_...), or direct media URL.\nBlank lines and # comments are ignored.',
+        'Paste one primary profile per line: profile URL, /profile/... path, @handle, or handle.\nBlank lines and # comments are ignored.',
         ''
       );
       if (raw == null) return;
-      const entries = parseManualPublicDownloadList(raw);
-      if (!entries.length) {
-        alert('No valid entries found. Paste at least one post URL, post ID, or direct media URL.');
+      const profiles = parseManualPublicDownloadList(raw);
+      if (!profiles.length) {
+        alert('No valid profiles found. Paste at least one primary profile URL/path/handle.');
         return;
       }
       if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel('Resolving...');
       if (publicListDownloadBtn?.setActive) publicListDownloadBtn.setActive(true);
       if (publicListDownloadBtn) publicListDownloadBtn.disabled = true;
-      const candidates = await buildManualListDownloadCandidates(entries);
+      const allCandidates = [];
+      const failures = [];
+      for (const profile of profiles) {
+        const profileHandle = String(profile?.profileHandle || '').trim();
+        if (!profileHandle) continue;
+        if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel(`@${profileHandle}...`);
+        const candidates = await listProfileBulkDownloadCandidates(profileHandle);
+        if (!candidates.length) failures.push(profileHandle);
+        allCandidates.push(...candidates);
+      }
+      const candidates = allCandidates;
       if (!candidates.length) {
-        alert('No new downloadable assets were resolved from that list.');
+        alert(
+          failures.length
+            ? `No new downloadable assets were found for: ${failures.join(', ')}.`
+            : 'No new downloadable assets were resolved from that list.'
+        );
         return;
       }
-      if (!confirm(`Download ${candidates.length} item(s) from your list?`)) return;
+      if (!confirm(`Download ${candidates.length} item(s) across ${profiles.length} profile(s)?`)) return;
 
-      const scopeKey = currentPublicDownloadScopeKey();
       if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel(`List ${candidates.length}...`);
       for (const candidate of candidates) {
         try {
@@ -8812,9 +8873,10 @@ async function renderAnalyzeTable(force = false) {
             downloaded = downloaded || ok;
           }
           if (!downloaded) continue;
-          if (!String(candidate.postId || '').startsWith('manual_')) {
-            markPublicPostDownloaded(candidate.postId, scopeKey);
-          }
+          const scopeKey = typeof candidate.scopeKey === 'string' && candidate.scopeKey.trim()
+            ? candidate.scopeKey.trim()
+            : currentPublicDownloadScopeKey();
+          markPublicPostDownloaded(candidate.postId, scopeKey);
           markPublicAssetDownloaded(candidate.assetKey, scopeKey);
         } catch (err) {
           console.error('[SoraUV] List bulk download failed:', candidate.postId, err);

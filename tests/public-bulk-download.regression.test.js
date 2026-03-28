@@ -57,6 +57,94 @@ test('extractPostIdFromHref supports relative and absolute public post links', (
   assert.equal(api.extractPostIdFromHref('https://sora.chatgpt.com/p/s_999xyz#frag'), 's_999xyz');
 });
 
+test('parseManualPublicDownloadList accepts profile inputs and ignores post urls', () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const sanitizeStart = src.indexOf('  function sanitizeDownloadPathPart(value, fallback = \'unknown\') {');
+  const sanitizeEnd = src.indexOf('  function resolvePostedTimestampMs(id) {', sanitizeStart);
+  const parseStart = src.indexOf('  function extractProfileHandleFromInput(input) {');
+  const parseEnd = src.indexOf('  async function listProfileBulkDownloadCandidates(profileHandle) {', parseStart);
+  assert.notEqual(sanitizeStart, -1, 'sanitizeDownloadPathPart start not found');
+  assert.notEqual(sanitizeEnd, -1, 'sanitizeDownloadPathPart end not found');
+  assert.notEqual(parseStart, -1, 'extractProfileHandleFromInput start not found');
+  assert.notEqual(parseEnd, -1, 'parseManualPublicDownloadList end not found');
+  const snippet = `${src.slice(sanitizeStart, sanitizeEnd)}\n${src.slice(parseStart, parseEnd)}`;
+  const context = vm.createContext({ URL });
+  vm.runInContext(`${snippet}\nglobalThis.__fn = parseManualPublicDownloadList;`, context, {
+    filename: 'inject-public-profile-list-parse.harness.js',
+  });
+  const result = JSON.parse(JSON.stringify(context.__fn(`
+    # comments are ignored
+    https://sora.chatgpt.com/profile/Alpha
+    /profile/username/Beta?foo=1
+    @Gamma
+    sora.chatgpt.com/p/s_ignore_me
+    https://sora.chatgpt.com/p/s_ignore_too
+    alpha
+  `)));
+  assert.deepEqual(result, [
+    { raw: 'https://sora.chatgpt.com/profile/Alpha', profileHandle: 'Alpha' },
+    { raw: '/profile/username/Beta?foo=1', profileHandle: 'Beta' },
+    { raw: '@Gamma', profileHandle: 'Gamma' },
+  ]);
+});
+
+test('listProfileBulkDownloadCandidates gathers profile feed entries and scopes history by profile handle', async () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const listStart = src.indexOf('  async function listProfileBulkDownloadCandidates(profileHandle) {');
+  const listEnd = src.indexOf('  async function bulkDownloadFromManualList() {', listStart);
+  assert.notEqual(listStart, -1, 'listProfileBulkDownloadCandidates start not found');
+  assert.notEqual(listEnd, -1, 'listProfileBulkDownloadCandidates end not found');
+  const snippet = src.slice(listStart, listEnd);
+  const historyScopes = [];
+  const context = vm.createContext({
+    URL,
+    location: { origin: 'https://sora.chatgpt.com' },
+    idToPublicDownloadUrl: new Map(),
+    resolveProfileUserIdByHandle: async (handle) => (String(handle).toLowerCase() === 'alpha' ? 'usr_alpha' : null),
+    getPublicDownloadedIds: (scopeKey) => {
+      historyScopes.push(scopeKey);
+      return new Set(['s_seen']);
+    },
+    getPublicDownloadedAssetKeys: () => new Set(['https://videos.openai.com/already.mp4']),
+    profileFeedCutForUserId: () => 'nf2',
+    buildBackendJsonHeaders: () => ({}),
+    processFeedJson: () => {},
+    normalizeId: (v) => String(v || '').trim(),
+    resolvePublicDownloadUrl: (item) => String(item?.downloadUrl || ''),
+    normalizeDownloadAssetKey: (url) => String(url || '').split('?')[0].toLowerCase(),
+    detectFeedNextCursor: (json) => json?.next_cursor || null,
+    fetch: async (url) => {
+      const parsed = new URL(String(url));
+      const cursor = parsed.searchParams.get('cursor');
+      const items = cursor
+        ? [{ id: 's_seen', downloadUrl: 'https://videos.openai.com/skip.mp4' }]
+        : [
+            { id: 's_1', downloadUrl: 'https://videos.openai.com/a.mp4?token=123' },
+            { id: 's_2', downloadUrl: 'https://videos.openai.com/already.mp4' },
+          ];
+      return {
+        ok: true,
+        headers: { get: () => 'application/json' },
+        json: async () => ({ items, next_cursor: cursor ? null : 'cursor_2' }),
+      };
+    },
+    setTimeout,
+  });
+  vm.runInContext(`${snippet}\nglobalThis.__fn = listProfileBulkDownloadCandidates;`, context, {
+    filename: 'inject-public-profile-list-candidates.harness.js',
+  });
+  const result = JSON.parse(JSON.stringify(await context.__fn('Alpha')));
+  assert.deepEqual(result, [
+    {
+      postId: 's_1',
+      url: 'https://videos.openai.com/a.mp4?token=123',
+      assetKey: 'https://videos.openai.com/a.mp4',
+      scopeKey: 'profile:alpha',
+    },
+  ]);
+  assert.deepEqual(historyScopes, ['profile:alpha']);
+});
+
 test('resolvePublicDownloadUrl falls back to attachment encoding source path', () => {
   const api = loadInjectPublicHelpers();
   const sample = {
