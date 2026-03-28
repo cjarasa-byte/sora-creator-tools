@@ -8221,6 +8221,11 @@ async function renderAnalyzeTable(force = false) {
     if (profileCharacterHydrationScopeKey === scopeKey) return;
     const profileHandle = currentProfileHandleFromURL();
     if (!profileHandle) return;
+    setPublicHydrationStatus({
+      visible: true,
+      percent: 0,
+      text: `Checking character feeds… ${idToPublicDownloadUrl.size} videos indexed`,
+    });
     const profileUserId = await resolveProfileUserIdByHandle(profileHandle);
     if (!profileUserId) return;
 
@@ -8233,6 +8238,11 @@ async function renderAnalyzeTable(force = false) {
     let pages = 0;
     while (pages < 50) {
       pages += 1;
+      setPublicHydrationStatus({
+        visible: true,
+        percent: 0,
+        text: `Checking characters list… page ${pages} • ${characterUsers.length} found • ${idToPublicDownloadUrl.size} videos indexed`,
+      });
       const url = new URL(characterListUrl.toString());
       if (cursor) url.searchParams.set('cursor', cursor);
       let payload = null;
@@ -8267,10 +8277,23 @@ async function renderAnalyzeTable(force = false) {
 
     const feedUsers = [...characterUsers];
     const seenFeedUsers = new Set();
+    if (!feedUsers.length) {
+      setPublicHydrationStatus({
+        visible: true,
+        percent: 100,
+        text: `No character feeds found • ${idToPublicDownloadUrl.size} videos indexed`,
+      });
+    }
+    let feedUsersProcessed = 0;
     for (const feedUser of feedUsers) {
       const targetUserId = typeof feedUser?.userId === 'string' ? feedUser.userId.trim() : '';
       if (!targetUserId || seenFeedUsers.has(targetUserId)) continue;
       seenFeedUsers.add(targetUserId);
+      feedUsersProcessed += 1;
+      const characterLabel = typeof feedUser?.username === 'string' && feedUser.username.trim()
+        ? `@${feedUser.username.trim()}`
+        : targetUserId;
+      const totalCharacters = feedUsers.length;
       const feedUrlBase = new URL(`${location.origin}/backend/project_y/profile_feed/${encodeURIComponent(targetUserId)}`);
       feedUrlBase.searchParams.set('limit', '8');
       feedUrlBase.searchParams.set('cut', profileFeedCutForUserId(targetUserId));
@@ -8280,6 +8303,12 @@ async function renderAnalyzeTable(force = false) {
       const seenFeedCursors = new Set();
       while (feedPages < 200) {
         feedPages += 1;
+        const pct = totalCharacters > 0 ? (feedUsersProcessed / totalCharacters) * 100 : 100;
+        setPublicHydrationStatus({
+          visible: true,
+          percent: pct,
+          text: `Checking character ${feedUsersProcessed}/${totalCharacters} (${characterLabel}) • page ${feedPages} • ${idToPublicDownloadUrl.size} videos indexed`,
+        });
         const nextUrl = new URL(feedUrlBase.toString());
         if (feedCursor) nextUrl.searchParams.set('cursor', feedCursor);
         let feedJson = null;
@@ -8305,6 +8334,11 @@ async function renderAnalyzeTable(force = false) {
       }
     }
 
+    setPublicHydrationStatus({
+      visible: true,
+      percent: 100,
+      text: `Character hydration complete • ${idToPublicDownloadUrl.size} videos indexed`,
+    });
     profileCharacterHydrationScopeKey = scopeKey;
   }
 
