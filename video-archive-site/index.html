@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sora Video Archive (Read Only)</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Sora Video Archive</h1>
+      <p class="subtitle">Read-only viewer for exported Sora Creator Tools CSV data.</p>
+    </div>
+    <a class="doc-link" href="./README.md" target="_blank" rel="noreferrer">Setup docs</a>
+  </header>
+
+  <main>
+    <section class="controls">
+      <label class="file-label" for="csvFile">Load CSV export</label>
+      <input id="csvFile" type="file" accept=".csv,text/csv" />
+
+      <label>
+        Search
+        <input id="searchInput" type="search" placeholder="Handle, caption, post id..." />
+      </label>
+
+      <label>
+        Sort by
+        <select id="sortBy">
+          <option value="latest_snapshot_desc">Latest snapshot (newest)</option>
+          <option value="likes_desc">Likes (highest)</option>
+          <option value="views_desc">Views (highest)</option>
+          <option value="interaction_desc">Interaction rate (highest)</option>
+          <option value="post_time_desc">Post time (newest)</option>
+        </select>
+      </label>
+
+      <label>
+        Creator
+        <select id="creatorFilter">
+          <option value="">All creators</option>
+        </select>
+      </label>
+    </section>
+
+    <section id="summary" class="summary hidden"></section>
+
+    <section id="emptyState" class="empty-state">
+      <h2>No data loaded yet</h2>
+      <p>Export a CSV from the extension dashboard (Data menu → Export all data CSV), then load it above.</p>
+    </section>
+
+    <section id="grid" class="video-grid"></section>
+  </main>
+
+  <template id="cardTemplate">
+    <article class="card">
+      <a class="thumb-link" target="_blank" rel="noreferrer">
+        <img class="thumb" alt="Video thumbnail" loading="lazy" />
+      </a>
+      <div class="card-body">
+        <div class="meta-row">
+          <span class="handle"></span>
+          <span class="post-time"></span>
+        </div>
+        <p class="caption"></p>
+        <dl class="stats"></dl>
+        <div class="links"></div>
+      </div>
+    </article>
+  </template>
+
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -175,6 +175,7 @@ Primary coverage currently targets dashboard regressions and shared UV drafts lo
 - [uv-drafts-logic.js](./uv-drafts-logic.js): shared pure logic for runtime/tests
 - [background.js](./background.js): metrics persistence/cache/index/migration
 - [dashboard.html](./dashboard.html), [dashboard.js](./dashboard.js), [dashboard.css](./dashboard.css), [theme.js](./theme.js): dashboard UI and analytics
+- [video-archive-site/](./video-archive-site): standalone read-only static site for viewing exported CSV as a video catalog (not loaded by the extension)
 - `tests/*.test.js`: regression and unit/integration tests
 
 ## Notes
