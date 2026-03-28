@@ -2284,6 +2284,8 @@ function badgeEmojiFor(id, meta) {
                   (Array.isArray(post.cameo_usernames) && post.cameo_usernames.length > 0
                     ? post.cameo_usernames
                     : existingMeta.cameoUsernames) || null,
+                profileRootHandle: existingMeta.profileRootHandle || null,
+                ownerHandle: existingMeta.ownerHandle || existingMeta.userHandle || null,
               });
             } else if (latest.t) {
               // Fallback: use snapshot time if post_time not available
@@ -2299,6 +2301,8 @@ function badgeEmojiFor(id, meta) {
                   (Array.isArray(post.cameo_usernames) && post.cameo_usernames.length > 0
                     ? post.cameo_usernames
                     : existingMeta.cameoUsernames) || null,
+                profileRootHandle: existingMeta.profileRootHandle || null,
+                ownerHandle: existingMeta.ownerHandle || existingMeta.userHandle || null,
               });
             }
           }
@@ -6593,6 +6597,8 @@ async function renderAnalyzeTable(force = false) {
               createdAtMs: remixCreatedAtMs,
               specialCharacter: remixSpecialCharacter || null,
               cameoUsernames: (Array.isArray(remixCameoUsernames) && remixCameoUsernames.length > 0) ? remixCameoUsernames : null,
+              profileRootHandle: pageUserHandle || null,
+              ownerHandle: remixUserHandle || null,
             });
           }
           
@@ -8223,12 +8229,15 @@ async function renderAnalyzeTable(force = false) {
     const creatorBase = `${creatorUser}/${datePart}`;
     const creatorPath = withCharacter(creatorBase);
     const paths = [];
-    if (meta.profileRootHandle) {
+    const rootHasDistinctCreator =
+      !!meta.profileRootHandle &&
+      rootUser.toLowerCase() !== creatorUser.toLowerCase();
+    if (rootHasDistinctCreator) {
       paths.push(withCharacter(`${rootUser}/${creatorUser}/${datePart}`));
       paths.push(creatorPath);
     } else {
-      paths.push(withCharacter(`${rootUser}/${datePart}`));
-      paths.push(creatorPath);
+      paths.push(withCharacter(`${creatorUser}/${datePart}`));
+      if (!meta.profileRootHandle) paths.push(creatorPath);
     }
     const seenPaths = new Set();
     return paths.filter((path) => {
