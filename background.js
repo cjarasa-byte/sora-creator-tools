@@ -883,6 +883,73 @@ function broadcastPurgeDownloadHistory(sendResponse) {
   return true;
 }
 
+
+function broadcastPurgeDownloadHistoryEnsuringTab(sendResponse) {
+  const nonce = Date.now();
+  try { chrome.storage.local.set({ purgeDownloadHistoryNonce: nonce }); } catch {}
+
+  chrome.tabs.query({ url: 'https://sora.chatgpt.com/*' }, (tabs) => {
+    const existingTabs = Array.isArray(tabs) ? tabs : [];
+
+    const finish = (tabList, openedTabId = null) => {
+      const list = Array.isArray(tabList) ? tabList : [];
+      for (const tab of list) {
+        try { chrome.tabs.sendMessage(tab.id, { action: 'purge_download_history', nonce }); } catch {}
+      }
+      if (typeof sendResponse === 'function') {
+        sendResponse({
+          ok: true,
+          tabsNotified: list.length,
+          nonce,
+          openedTab: openedTabId != null,
+          openedTabId,
+        });
+      }
+    };
+
+    if (existingTabs.length) {
+      finish(existingTabs, null);
+      return;
+    }
+
+    chrome.tabs.create({ url: 'https://sora.chatgpt.com/', active: false }, (tab) => {
+      const tabId = tab?.id;
+      if (typeof tabId !== 'number') {
+        finish([], null);
+        return;
+      }
+
+      let completed = false;
+      let timeoutId = null;
+
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        try { chrome.tabs.onUpdated.removeListener(handleUpdated); } catch {}
+      };
+
+      const done = () => {
+        if (completed) return;
+        completed = true;
+        cleanup();
+        finish([tab], tabId);
+      };
+
+      const handleUpdated = (updatedTabId, info) => {
+        if (updatedTabId !== tabId) return;
+        if (info?.status === 'complete') done();
+      };
+
+      try { chrome.tabs.onUpdated.addListener(handleUpdated); } catch {}
+      timeoutId = setTimeout(done, 2500);
+    });
+  });
+
+  return true;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isPlainObject(message) || typeof message.action !== 'string') return false;
   if (!isTrustedSender(sender)) {
@@ -903,6 +970,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'purge_download_history') {
     return broadcastPurgeDownloadHistory(sendResponse);
+  }
+
+  if (message.action === 'purge_download_history_ensure_tab') {
+    return broadcastPurgeDownloadHistoryEnsuringTab(sendResponse);
   }
 
   if (message.action === 'metrics_batch') {
