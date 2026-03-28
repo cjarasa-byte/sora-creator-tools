@@ -179,3 +179,21 @@ test('listPublicBulkDownloadCandidates deduplicates by canonical asset URL', () 
     { postId: 's_3', url: 'https://videos.openai.com/other.mp4', assetKey: 'https://videos.openai.com/other.mp4' },
   ]);
 });
+
+test('profileFeedCutForUserId uses appearances for character IDs and nf2 for user IDs', () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const cutStart = src.indexOf('  function profileFeedCutForUserId(userId) {');
+  const cutEnd = src.indexOf('  async function requestBackgroundDownload(url, filename, timeoutMs = 15000) {', cutStart);
+  assert.notEqual(cutStart, -1, 'profileFeedCutForUserId start not found');
+  assert.notEqual(cutEnd, -1, 'profileFeedCutForUserId end not found');
+  const snippet = src.slice(cutStart, cutEnd);
+
+  const context = vm.createContext({});
+  vm.runInContext(`${snippet}\nglobalThis.__fn = profileFeedCutForUserId;`, context, {
+    filename: 'inject-profile-feed-cut.harness.js',
+  });
+
+  assert.equal(context.__fn('ch_692fba0fc1f8819181df844655140c99'), 'appearances');
+  assert.equal(context.__fn(' user_123 '), 'nf2');
+  assert.equal(context.__fn(''), 'nf2');
+});
