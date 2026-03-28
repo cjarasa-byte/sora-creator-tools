@@ -180,6 +180,83 @@ test('dedupeManualListCandidates removes repeated posts/assets and caps oversize
   ]);
 });
 
+test('bulkDownloadFromManualList downloads every listed profile without confirmation prompts', async () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const bulkStart = src.indexOf('  async function bulkDownloadFromManualList() {');
+  const bulkEnd = src.indexOf('  function updateRemixChainButtonState() {', bulkStart);
+  assert.notEqual(bulkStart, -1, 'bulkDownloadFromManualList start not found');
+  assert.notEqual(bulkEnd, -1, 'bulkDownloadFromManualList end not found');
+  const snippet = src.slice(bulkStart, bulkEnd);
+
+  const listedProfiles = [];
+  const downloadedUrls = [];
+  const markedIds = [];
+  const markedAssets = [];
+  let confirmCalls = 0;
+
+  const context = vm.createContext({
+    parseManualPublicDownloadList: () => ([
+      { profileHandle: 'Alpha' },
+      { profileHandle: 'Beta' },
+    ]),
+    listProfileBulkDownloadCandidates: async (handle) => {
+      listedProfiles.push(handle);
+      const lower = String(handle).toLowerCase();
+      return [{
+        postId: `s_${lower}`,
+        url: `https://videos.openai.com/${lower}.mp4`,
+        assetKey: `https://videos.openai.com/${lower}.mp4`,
+        scopeKey: `profile:${lower}`,
+      }];
+    },
+    dedupeManualListCandidates: (rows) => rows,
+    buildPublicDownloadPaths: (postId) => [`downloads/${postId}.mp4`],
+    requestBackgroundDownload: async (url, filename) => {
+      downloadedUrls.push({ url, filename });
+      return true;
+    },
+    markPublicPostDownloaded: (postId, scopeKey) => markedIds.push({ postId, scopeKey }),
+    markPublicAssetDownloaded: (assetKey, scopeKey) => markedAssets.push({ assetKey, scopeKey }),
+    currentPublicDownloadScopeKey: () => 'profile:fallback',
+    publicListDownloadBtn: {
+      disabled: false,
+      setLabel: () => {},
+      setActive: () => {},
+    },
+    prompt: () => 'Alpha\nBeta',
+    confirm: () => {
+      confirmCalls += 1;
+      return true;
+    },
+    alert: () => {
+      throw new Error('unexpected alert');
+    },
+    console,
+    setTimeout,
+    clearTimeout,
+  });
+
+  vm.runInContext(`${snippet}\nglobalThis.__fn = bulkDownloadFromManualList;`, context, {
+    filename: 'inject-public-profile-list-bulk.harness.js',
+  });
+  await context.__fn();
+
+  assert.deepEqual(listedProfiles, ['Alpha', 'Beta']);
+  assert.equal(confirmCalls, 0);
+  assert.deepEqual(downloadedUrls, [
+    { url: 'https://videos.openai.com/alpha.mp4', filename: 'downloads/s_alpha.mp4' },
+    { url: 'https://videos.openai.com/beta.mp4', filename: 'downloads/s_beta.mp4' },
+  ]);
+  assert.deepEqual(markedIds, [
+    { postId: 's_alpha', scopeKey: 'profile:alpha' },
+    { postId: 's_beta', scopeKey: 'profile:beta' },
+  ]);
+  assert.deepEqual(markedAssets, [
+    { assetKey: 'https://videos.openai.com/alpha.mp4', scopeKey: 'profile:alpha' },
+    { assetKey: 'https://videos.openai.com/beta.mp4', scopeKey: 'profile:beta' },
+  ]);
+});
+
 test('resolvePublicDownloadUrl falls back to attachment encoding source path', () => {
   const api = loadInjectPublicHelpers();
   const sample = {
