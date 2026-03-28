@@ -99,6 +99,7 @@
   let lastFeedUrlTemplate = null; // Remember a feed URL pattern to reuse for public hydration paging
   let publicVideoIndexScopeKey = ''; // Route scope key for indexed public download URLs
   let profilePostCountEstimate = null; // Best-effort post count derived from feed/profile payloads
+  let profileCharacterHydrationScopeKey = ''; // Route scope key when character-feed hydration has completed
   const charToOriginalIndex = new Map(); // Store original order from API
   let charGlobalIndexCounter = 0; // Global counter for character order across all API calls
 
@@ -518,6 +519,7 @@
   function resetPublicVideoIndexCache() {
     idToPublicDownloadUrl.clear();
     profilePostCountEstimate = null;
+    profileCharacterHydrationScopeKey = '';
     publicVideoIndexScopeKey = currentPublicIndexScopeKey();
   }
 
@@ -6166,7 +6168,7 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
-  function processFeedJson(json) {
+  function processFeedJson(json, context = null) {
     const items = json?.items || json?.data?.items || [];
     try {
       const count = Number(
@@ -6178,7 +6180,11 @@ async function renderAnalyzeTable(force = false) {
       );
       if (Number.isFinite(count) && count >= 0) profilePostCountEstimate = Math.floor(count);
     } catch {}
-    const pageHandle = isProfile() ? currentProfileHandleFromURL() : null;
+    const contextProfileRootHandle =
+      typeof context?.profileRootHandle === 'string' && context.profileRootHandle.trim()
+        ? context.profileRootHandle.trim()
+        : null;
+    const pageHandle = contextProfileRootHandle || (isProfile() ? currentProfileHandleFromURL() : null);
     const pageUserHandle = pageHandle || null;
     const pageUserKey = pageUserHandle ? `h:${pageUserHandle.toLowerCase()}` : 'unknown';
     const batch = [];
@@ -6375,12 +6381,22 @@ async function renderAnalyzeTable(force = false) {
           (Array.isArray(cameoUsernames) && cameoUsernames.length > 0
             ? cameoUsernames
             : existingMeta?.cameoUsernames) || null;
+        const resolvedProfileRootHandle =
+          pageUserHandle
+          || existingMeta?.profileRootHandle
+          || null;
+        const resolvedOwnerHandle =
+          userHandle
+          || existingMeta?.ownerHandle
+          || null;
         idToMeta.set(id, {
           ageMin,
           userHandle,
           createdAtMs,
           specialCharacter: resolvedSpecialCharacter,
           cameoUsernames: resolvedCameoUsernames,
+          profileRootHandle: resolvedProfileRootHandle,
+          ownerHandle: resolvedOwnerHandle,
         });
       }
 
@@ -8087,7 +8103,8 @@ async function renderAnalyzeTable(force = false) {
 
   function buildPublicDownloadPath(postId) {
     const meta = idToMeta.get(postId) || {};
-    const user = sanitizeDownloadPathPart(meta.userHandle || 'unknown-user', 'unknown-user');
+    const rootUser = sanitizeDownloadPathPart(meta.profileRootHandle || meta.userHandle || 'unknown-user', 'unknown-user');
+    const creatorUser = sanitizeDownloadPathPart(meta.ownerHandle || meta.userHandle || 'unknown-user', 'unknown-user');
     let datePart = 'unknown-date';
     if (Number.isFinite(meta.createdAtMs) && meta.createdAtMs > 0) {
       const dt = new Date(meta.createdAtMs);
@@ -8113,12 +8130,133 @@ async function renderAnalyzeTable(force = false) {
       folderNames.push(sanitized);
     }
     const videoFilename = `${postId}.mp4`;
+    if (meta.profileRootHandle) {
+      if (folderNames.length > 0) {
+        folderNames.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+        const characterFolder = folderNames.join('__');
+        return `${rootUser}/${creatorUser}/${datePart}/${characterFolder}/${videoFilename}`;
+      }
+      return `${rootUser}/${creatorUser}/${datePart}/${videoFilename}`;
+    }
     if (folderNames.length > 0) {
       folderNames.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
       const characterFolder = folderNames.join('__');
-      return `${user}/${datePart}/${characterFolder}/${videoFilename}`;
+      return `${rootUser}/${datePart}/${characterFolder}/${videoFilename}`;
     }
-    return `${user}/${datePart}/${videoFilename}`;
+    return `${rootUser}/${datePart}/${videoFilename}`;
+  }
+
+  async function resolveProfileUserIdByHandle(profileHandle) {
+    const safeHandle = typeof profileHandle === 'string' ? profileHandle.trim() : '';
+    if (!safeHandle) return null;
+    const url = `${location.origin}/backend/project_y/profile/username/${encodeURIComponent(safeHandle)}`;
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        headers: buildBackendJsonHeaders(),
+      });
+      if (!response.ok) return null;
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('json')) return null;
+      const payload = await response.json();
+      const userId = payload?.user_id || payload?.profile?.user_id || payload?.id || null;
+      if (typeof userId === 'string' && userId.trim()) return userId.trim();
+    } catch {}
+    return null;
+  }
+
+  async function hydrateCharacterProfileVideoIndex() {
+    if (!isProfile()) return;
+    const scopeKey = currentPublicIndexScopeKey();
+    if (profileCharacterHydrationScopeKey === scopeKey) return;
+    const profileHandle = currentProfileHandleFromURL();
+    if (!profileHandle) return;
+    const profileUserId = await resolveProfileUserIdByHandle(profileHandle);
+    if (!profileUserId) return;
+
+    const characterListUrl = new URL(`${location.origin}/backend/project_y/profile/${encodeURIComponent(profileUserId)}/characters`);
+    characterListUrl.searchParams.set('limit', '30');
+
+    const characterUsers = [];
+    const seenCharacterIds = new Set();
+    let cursor = '';
+    let pages = 0;
+    while (pages < 50) {
+      pages += 1;
+      const url = new URL(characterListUrl.toString());
+      if (cursor) url.searchParams.set('cursor', cursor);
+      let payload = null;
+      try {
+        const response = await fetch(url.toString(), {
+          method: 'GET',
+          credentials: 'include',
+          headers: buildBackendJsonHeaders(),
+        });
+        if (!response.ok) break;
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.includes('json')) break;
+        payload = await response.json();
+      } catch {
+        break;
+      }
+      processCharactersJson(payload);
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      for (const item of items) {
+        const characterUserId = typeof item?.user_id === 'string' ? item.user_id.trim() : '';
+        if (!characterUserId || seenCharacterIds.has(characterUserId)) continue;
+        seenCharacterIds.add(characterUserId);
+        characterUsers.push({
+          userId: characterUserId,
+          username: typeof item?.username === 'string' && item.username.trim() ? item.username.trim() : null,
+        });
+      }
+      const next = detectFeedNextCursor(payload);
+      if (!next || next === cursor) break;
+      cursor = next;
+    }
+
+    const feedUsers = [{ userId: profileUserId, username: profileHandle }, ...characterUsers];
+    const seenFeedUsers = new Set();
+    for (const feedUser of feedUsers) {
+      const targetUserId = typeof feedUser?.userId === 'string' ? feedUser.userId.trim() : '';
+      if (!targetUserId || seenFeedUsers.has(targetUserId)) continue;
+      seenFeedUsers.add(targetUserId);
+      const feedUrlBase = new URL(`${location.origin}/backend/project_y/profile_feed/${encodeURIComponent(targetUserId)}`);
+      feedUrlBase.searchParams.set('limit', '8');
+      feedUrlBase.searchParams.set('cut', 'nf2');
+
+      let feedCursor = '';
+      let feedPages = 0;
+      const seenFeedCursors = new Set();
+      while (feedPages < 200) {
+        feedPages += 1;
+        const nextUrl = new URL(feedUrlBase.toString());
+        if (feedCursor) nextUrl.searchParams.set('cursor', feedCursor);
+        let feedJson = null;
+        try {
+          const response = await fetch(nextUrl.toString(), {
+            method: 'GET',
+            credentials: 'include',
+            headers: buildBackendJsonHeaders(),
+          });
+          if (!response.ok) break;
+          const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+          if (!contentType.includes('json')) break;
+          feedJson = await response.json();
+        } catch {
+          break;
+        }
+        processFeedJson(feedJson, { profileRootHandle: profileHandle });
+        const next = detectFeedNextCursor(feedJson);
+        if (!next || seenFeedCursors.has(next)) break;
+        seenFeedCursors.add(next);
+        feedCursor = next;
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+    }
+
+    profileCharacterHydrationScopeKey = scopeKey;
   }
 
   async function requestBackgroundDownload(url, filename, timeoutMs = 15000) {
@@ -8443,6 +8581,7 @@ async function renderAnalyzeTable(force = false) {
     // First hydrate the public feed index directly from paginated backend endpoints.
     // This avoids requiring full-page media rendering/scrolling before bulk download.
     await hydratePublicVideoIndex();
+    await hydrateCharacterProfileVideoIndex();
 
     // Download every post we've indexed from feed pagination.
     // This supports large profile/explore sessions where users scroll through 1k+ videos.

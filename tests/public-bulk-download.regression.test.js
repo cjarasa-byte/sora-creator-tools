@@ -95,6 +95,13 @@ test('buildPublicDownloadPath uses username/date/character/post-id.mp4 structure
         specialCharacter: 'Hero Prime',
         cameoUsernames: ['Nova', 'hero prime', 'Atlas'],
       }],
+      ['s_profile', {
+        userHandle: 'creatorz',
+        ownerHandle: 'creatorz',
+        profileRootHandle: 'buckleybunny',
+        createdAtMs: Date.UTC(2026, 2, 26, 12, 0, 0),
+        cameoUsernames: ['Night Rider'],
+      }],
     ]),
   });
   const snippet = `${src.slice(sanitizeStart, sanitizeEnd)}\n${src.slice(buildStart, buildEnd)}`;
@@ -104,6 +111,7 @@ test('buildPublicDownloadPath uses username/date/character/post-id.mp4 structure
   assert.equal(context.__fn('s_char'), 'alice/2026-03-26/Hero_Prime/s_char.mp4');
   assert.equal(context.__fn('s_plain'), 'alice/2026-03-26/s_plain.mp4');
   assert.equal(context.__fn('s_multi'), 'alice/2026-03-26/Atlas__Hero_Prime__Nova/s_multi.mp4');
+  assert.equal(context.__fn('s_profile'), 'buckleybunny/creatorz/2026-03-26/Night_Rider/s_profile.mp4');
 });
 
 test('listPublicBulkDownloadCandidates includes indexed posts beyond currently visible cards', () => {
