@@ -103,6 +103,14 @@ test('buildPublicDownloadPath uses username/date/character/post-id.mp4 structure
         createdAtMs: Date.UTC(2026, 2, 26, 12, 0, 0),
         cameoUsernames: ['Night Rider'],
       }],
+
+      ['s_self_profile', {
+        userHandle: 'huasua',
+        ownerHandle: 'huasua',
+        profileRootHandle: 'huasua',
+        createdAtMs: Date.UTC(2026, 2, 28, 12, 0, 0),
+        cameoUsernames: ['cjarasa.desertvesp'],
+      }],
     ]),
   });
   const snippet = `${src.slice(sanitizeStart, sanitizeEnd)}\n${src.slice(buildStart, buildEnd)}`;
@@ -116,6 +124,11 @@ test('buildPublicDownloadPath uses username/date/character/post-id.mp4 structure
   assert.deepEqual(JSON.parse(JSON.stringify(context.__paths('s_profile'))), [
     'buckleybunny/creatorz/2026-03-26/Night_Rider/s_profile.mp4',
     'creatorz/2026-03-26/Night_Rider/s_profile.mp4',
+  ]);
+
+  assert.equal(context.__fn('s_self_profile'), 'huasua/2026-03-28/cjarasa.desertvesp/s_self_profile.mp4');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.__paths('s_self_profile'))), [
+    'huasua/2026-03-28/cjarasa.desertvesp/s_self_profile.mp4',
   ]);
 });
 
