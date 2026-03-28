@@ -2057,6 +2057,24 @@ body.is-purge-confirm-open .purge-modal-overlay{
   font-size:11px;line-height:1.4;color:rgba(255,255,255,0.4);
   font-family:var(--font-system);
 }
+.purge-inline-action-row{
+  margin-top:8px;
+}
+.purge-inline-action-btn{
+  padding:8px 14px;border-radius:999px;border:1px solid rgba(var(--accent-rgb),0.35);
+  font-size:12px;font-weight:700;cursor:pointer;user-select:none;
+  background:rgba(var(--accent-rgb),0.15);color:#e8f7ff;
+  box-shadow:var(--shadow-sm);
+  transition:background 120ms ease,border-color 120ms ease,box-shadow 120ms ease,opacity 120ms ease;
+}
+.purge-inline-action-btn:hover{
+  background:rgba(var(--accent-rgb),0.26);
+  border-color:rgba(var(--accent-rgb),0.6);
+  box-shadow:0 0 10px rgba(var(--accent-rgb),0.28);
+}
+.purge-inline-action-btn:disabled{
+  opacity:0.6;cursor:progress;
+}
 .purge-actions{
   display:flex;justify-content:flex-start;gap:12px;margin-top:4px;flex-wrap:wrap;
 }

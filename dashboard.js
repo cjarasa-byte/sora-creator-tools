@@ -10845,6 +10845,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
     const postPurgeConfirmNo = $('#postPurgeConfirmNo');
     const purgeResetPrefs = $('#purgeResetPrefs');
     const purgeClearCache = $('#purgeClearCache');
+    const purgeClearDownloadCacheBtn = $('#purgeClearDownloadCacheBtn');
     
     function setPurgeConfirmOpen(isOpen){
       document.body.classList.toggle('is-purge-confirm-open', isOpen);
@@ -11058,6 +11059,15 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
       try { localStorage.removeItem(BOOT_CACHE_KEY); } catch {}
       try { localStorage.removeItem(BEST_TIME_CACHE_KEY); } catch {}
       try { chrome.storage.local.remove([USERS_INDEX_STORAGE_KEY]); } catch {}
+    }
+
+    async function clearDownloadCache(){
+      try {
+        await chrome.runtime.sendMessage({ action: 'purge_download_history' });
+        return true;
+      } catch {
+        return false;
+      }
     }
 
     function resetStoredPreferences(){
@@ -11365,6 +11375,21 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
         await exportAllDataCSV();
       });
     }
+    if (purgeClearDownloadCacheBtn) {
+      purgeClearDownloadCacheBtn.addEventListener('click', async ()=>{
+        purgeClearDownloadCacheBtn.disabled = true;
+        const originalText = purgeClearDownloadCacheBtn.textContent;
+        purgeClearDownloadCacheBtn.textContent = 'Clearing…';
+        const ok = await clearDownloadCache();
+        if (ok) {
+          alert('Download cache cleared.');
+        } else {
+          alert('Unable to clear download cache right now. Please try again.');
+        }
+        purgeClearDownloadCacheBtn.textContent = originalText;
+        purgeClearDownloadCacheBtn.disabled = false;
+      });
+    }
 
     $('#purgeConfirmNo').addEventListener('click', ()=>{
       purgeConfirmDialog.style.display = 'none';
@@ -11549,7 +11574,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
           await ensureFullSnapshots();
           const { purgedUsers, purgedPosts } = applyPurgeToMetrics(loadedMetrics, purgeOpts);
           await saveMetrics(loadedMetrics, { userKeys: Object.keys(loadedMetrics.users || {}) });
-          try { await chrome.runtime.sendMessage({ action: 'purge_download_history' }); } catch {}
+          await clearDownloadCache();
           await updateStorageSizeDisplay();
           if (shouldClearCache) clearTemporaryCaches();
           if (shouldResetPrefs) resetStoredPreferences();
