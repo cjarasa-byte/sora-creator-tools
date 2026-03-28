@@ -33,6 +33,7 @@ Unofficial community extension. Not affiliated with, endorsed by, or sponsored b
 - **Super-Hot Indicator**: Highlights fast-breaking posts (high likes in low elapsed time) with stronger visual treatment.
 - **Best Posting Time Cue**: Marks cards posted near recurring high-performing windows based on gathered history.
 - **Quick Feed Filters**: One-click age filters (`<3h` ... `<21h`) plus a **No Remixes** filter.
+- **Bulk + List Downloads**: Download indexed public videos in bulk or paste a manual list of post URLs/IDs/direct media URLs into **List DL**.
 
 ### Gather Mode
 

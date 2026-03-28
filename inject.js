@@ -323,6 +323,7 @@
   let bookmarksFilterState = 0;
   let bookmarksBtn = null;
   let publicBulkDownloadBtn = null;
+  let publicListDownloadBtn = null;
   let publicHydrationStatusWrapEl = null;
   let publicHydrationStatusTrackEl = null;
   let publicHydrationStatusFillEl = null;
@@ -3270,6 +3271,22 @@ function badgeEmojiFor(id, meta) {
       });
     };
     buttonRow.appendChild(publicBulkDownloadBtn);
+
+    // Manual list-based bulk download for pasted post URLs/IDs/direct file URLs
+    publicListDownloadBtn = document.createElement('button');
+    makePill(publicListDownloadBtn, 'List DL');
+    publicListDownloadBtn.classList.add('sora-uv-public-list-download-btn');
+    publicListDownloadBtn.style.display = 'none';
+    publicListDownloadBtn.onclick = () => {
+      if (publicListDownloadBtn.disabled) return;
+      bulkDownloadFromManualList().catch((err) => {
+        console.error('[SoraUV] List bulk download error:', err);
+        if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel('List DL');
+        if (publicListDownloadBtn?.setActive) publicListDownloadBtn.setActive(false);
+        if (publicListDownloadBtn) publicListDownloadBtn.disabled = false;
+      });
+    };
+    buttonRow.appendChild(publicListDownloadBtn);
 
     const hydrationStatusWrap = document.createElement('div');
     hydrationStatusWrap.className = 'sora-uv-public-hydration-status';
@@ -7815,9 +7832,10 @@ async function renderAnalyzeTable(force = false) {
     if (analyzeBtn) analyzeBtn.style.display = isDrafts() ? 'none' : '';
 
     // Public bulk download button on Explore/Profile/Post (not drafts/editor)
-    if (publicBulkDownloadBtn) {
+    if (publicBulkDownloadBtn || publicListDownloadBtn) {
       const showPublicBulkDownload = !isDrafts() && !isDraftEditor() && (isTopFeed() || isProfile() || isPost() || isExplore());
-      publicBulkDownloadBtn.style.display = showPublicBulkDownload ? '' : 'none';
+      if (publicBulkDownloadBtn) publicBulkDownloadBtn.style.display = showPublicBulkDownload ? '' : 'none';
+      if (publicListDownloadBtn) publicListDownloadBtn.style.display = showPublicBulkDownload ? '' : 'none';
       if (!showPublicBulkDownload && !publicIndexHydrationInFlight) {
         resetPublicHydrationStatus();
       }
@@ -8708,6 +8726,108 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
+  function parseManualPublicDownloadList(rawInput) {
+    const text = typeof rawInput === 'string' ? rawInput : '';
+    const rows = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
+    const seenKeys = new Set();
+    const out = [];
+    for (const row of rows) {
+      const fromHref = extractPostIdFromHref(row);
+      const fromId = isLikelyPostId(row) ? normalizeId(row) : null;
+      const postId = fromHref || fromId || '';
+      const isDirectUrl = /^https?:\/\//i.test(row);
+      const key = postId ? `post:${postId}` : isDirectUrl ? `url:${normalizeDownloadAssetKey(row)}` : '';
+      if (!key || seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      out.push({ raw: row, postId, directUrl: isDirectUrl ? row : '' });
+    }
+    return out;
+  }
+
+  async function buildManualListDownloadCandidates(entries) {
+    const scopeKey = currentPublicDownloadScopeKey();
+    const downloadedIds = getPublicDownloadedIds(scopeKey);
+    const downloadedAssetKeys = getPublicDownloadedAssetKeys(scopeKey);
+    const seenAssetKeys = new Set();
+    const out = [];
+    for (const entry of (Array.isArray(entries) ? entries : [])) {
+      const postId = typeof entry?.postId === 'string' ? entry.postId.trim() : '';
+      let url = '';
+      if (postId) {
+        url = String(idToPublicDownloadUrl.get(postId) || '').trim();
+        if (!url) {
+          await fetchPostDetailForChain(postId, { retries: 1 });
+          url = String(idToPublicDownloadUrl.get(postId) || '').trim();
+        }
+      } else if (typeof entry?.directUrl === 'string' && entry.directUrl.trim()) {
+        url = entry.directUrl.trim();
+      }
+      const assetKey = normalizeDownloadAssetKey(url);
+      if (!url || !assetKey) continue;
+      if (postId && downloadedIds.has(postId)) continue;
+      if (downloadedAssetKeys.has(assetKey) || seenAssetKeys.has(assetKey)) continue;
+      seenAssetKeys.add(assetKey);
+      out.push({
+        postId: postId || `manual_${Math.random().toString(36).slice(2, 10)}`,
+        url,
+        assetKey,
+      });
+    }
+    return out;
+  }
+
+  async function bulkDownloadFromManualList() {
+    try {
+      const raw = prompt(
+        'Paste one item per line: post URL (/p/...), post ID (p_...), or direct media URL.\nBlank lines and # comments are ignored.',
+        ''
+      );
+      if (raw == null) return;
+      const entries = parseManualPublicDownloadList(raw);
+      if (!entries.length) {
+        alert('No valid entries found. Paste at least one post URL, post ID, or direct media URL.');
+        return;
+      }
+      if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel('Resolving...');
+      if (publicListDownloadBtn?.setActive) publicListDownloadBtn.setActive(true);
+      if (publicListDownloadBtn) publicListDownloadBtn.disabled = true;
+      const candidates = await buildManualListDownloadCandidates(entries);
+      if (!candidates.length) {
+        alert('No new downloadable assets were resolved from that list.');
+        return;
+      }
+      if (!confirm(`Download ${candidates.length} item(s) from your list?`)) return;
+
+      const scopeKey = currentPublicDownloadScopeKey();
+      if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel(`List ${candidates.length}...`);
+      for (const candidate of candidates) {
+        try {
+          const filepaths = buildPublicDownloadPaths(candidate.postId);
+          let downloaded = false;
+          for (const filename of filepaths) {
+            const ok = await requestBackgroundDownload(candidate.url, filename);
+            downloaded = downloaded || ok;
+          }
+          if (!downloaded) continue;
+          if (!String(candidate.postId || '').startsWith('manual_')) {
+            markPublicPostDownloaded(candidate.postId, scopeKey);
+          }
+          markPublicAssetDownloaded(candidate.assetKey, scopeKey);
+        } catch (err) {
+          console.error('[SoraUV] List bulk download failed:', candidate.postId, err);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+    } finally {
+      if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel('List DL');
+      if (publicListDownloadBtn?.setActive) publicListDownloadBtn.setActive(false);
+      if (publicListDownloadBtn) publicListDownloadBtn.disabled = false;
+    }
+  }
+
   function updateRemixChainButtonState() {
     if (!remixChainDownloadBtn) return;
     const sid = currentSIdFromURL();
@@ -8739,70 +8859,73 @@ async function renderAnalyzeTable(force = false) {
   }
 
   async function bulkDownloadPublicPosts() {
-    // First hydrate the public feed index directly from paginated backend endpoints.
-    // This avoids requiring full-page media rendering/scrolling before bulk download.
-    await hydratePublicVideoIndex();
-    await hydrateCharacterProfileVideoIndex();
+    try {
+      // First hydrate the public feed index directly from paginated backend endpoints.
+      // This avoids requiring full-page media rendering/scrolling before bulk download.
+      await hydratePublicVideoIndex();
+      await hydrateCharacterProfileVideoIndex();
 
-    // Download every post we've indexed from feed pagination.
-    // This supports large profile/explore sessions where users scroll through 1k+ videos.
-    let candidates = listPublicBulkDownloadCandidates();
-    if (!candidates.length) {
-      await hydratePublicCandidatesFromVisiblePostCards();
-      candidates = listPublicBulkDownloadCandidates();
-    }
-    if (!candidates.length) {
-      const indexedCount = idToPublicDownloadUrl.size;
-      if (indexedCount > 0) {
-        const scopeKey = currentPublicDownloadScopeKey();
-        const shouldResetHistory = confirm(
-          `Found ${indexedCount} indexed public video(s), but none are currently marked as new for this page.\n\n` +
-          'Reset this page\'s download history cache and try again?'
-        );
-        if (shouldResetHistory) {
-          const cleared = clearPublicDownloadedHistoryForScope(scopeKey);
-          if (!cleared) {
-            alert('Unable to reset download history cache for this page right now.');
-            return;
-          }
-          candidates = listPublicBulkDownloadCandidates();
-          if (!candidates.length) {
-            alert('Download history cache was reset, but there are still no downloadable public videos available yet.');
+      // Download every post we've indexed from feed pagination.
+      // This supports large profile/explore sessions where users scroll through 1k+ videos.
+      let candidates = listPublicBulkDownloadCandidates();
+      if (!candidates.length) {
+        await hydratePublicCandidatesFromVisiblePostCards();
+        candidates = listPublicBulkDownloadCandidates();
+      }
+      if (!candidates.length) {
+        const indexedCount = idToPublicDownloadUrl.size;
+        if (indexedCount > 0) {
+          const scopeKey = currentPublicDownloadScopeKey();
+          const shouldResetHistory = confirm(
+            `Found ${indexedCount} indexed public video(s), but none are currently marked as new for this page.\n\n` +
+            'Reset this page\'s download history cache and try again?'
+          );
+          if (shouldResetHistory) {
+            const cleared = clearPublicDownloadedHistoryForScope(scopeKey);
+            if (!cleared) {
+              alert('Unable to reset download history cache for this page right now.');
+              return;
+            }
+            candidates = listPublicBulkDownloadCandidates();
+            if (!candidates.length) {
+              alert('Download history cache was reset, but there are still no downloadable public videos available yet.');
+              return;
+            }
+          } else {
             return;
           }
         } else {
+          alert('No new downloadable public videos found on this page yet.');
           return;
         }
-      } else {
-        alert('No new downloadable public videos found on this page yet.');
-        return;
       }
-    }
-    if (!confirm(`Download ${candidates.length} public video(s)?`)) return;
+      if (!confirm(`Download ${candidates.length} public video(s)?`)) return;
 
-    const scopeKey = currentPublicDownloadScopeKey();
-    if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel(`DL ${candidates.length}...`);
-    if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
-    if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
-    for (const candidate of candidates) {
-      try {
-        const filepaths = buildPublicDownloadPaths(candidate.postId);
-        let downloaded = false;
-        for (const filename of filepaths) {
-          const ok = await requestBackgroundDownload(candidate.url, filename);
-          downloaded = downloaded || ok;
+      const scopeKey = currentPublicDownloadScopeKey();
+      if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel(`DL ${candidates.length}...`);
+      if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
+      if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
+      for (const candidate of candidates) {
+        try {
+          const filepaths = buildPublicDownloadPaths(candidate.postId);
+          let downloaded = false;
+          for (const filename of filepaths) {
+            const ok = await requestBackgroundDownload(candidate.url, filename);
+            downloaded = downloaded || ok;
+          }
+          if (!downloaded) continue;
+          markPublicPostDownloaded(candidate.postId, scopeKey);
+          markPublicAssetDownloaded(candidate.assetKey, scopeKey);
+        } catch (err) {
+          console.error('[SoraUV] Public bulk download failed:', candidate.postId, err);
         }
-        if (!downloaded) continue;
-        markPublicPostDownloaded(candidate.postId, scopeKey);
-        markPublicAssetDownloaded(candidate.assetKey, scopeKey);
-      } catch (err) {
-        console.error('[SoraUV] Public bulk download failed:', candidate.postId, err);
+        await new Promise((resolve) => setTimeout(resolve, 120));
       }
-      await new Promise((resolve) => setTimeout(resolve, 120));
+    } finally {
+      if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
+      if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
+      if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
     }
-    if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
-    if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
-    if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
   }
 
   function detectFeedNextCursor(payload) {
