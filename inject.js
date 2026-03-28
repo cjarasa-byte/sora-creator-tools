@@ -539,6 +539,19 @@
     publicHydrationStatusFillEl.style.width = `${safePct}%`;
     publicHydrationStatusTextEl.textContent = String(opts.text || '');
   }
+  function setPublicBulkDownloadHydrationState(isLoading) {
+    if (!publicBulkDownloadBtn) return;
+    if (isLoading) {
+      const indexedCount = idToPublicDownloadUrl.size;
+      if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel(`Load ${indexedCount}...`);
+      if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
+      publicBulkDownloadBtn.disabled = true;
+      return;
+    }
+    if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
+    if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
+    publicBulkDownloadBtn.disabled = false;
+  }
   function resetPublicHydrationStatus() {
     setPublicHydrationStatus({ visible: false, percent: 0, text: '' });
   }
@@ -2969,7 +2982,7 @@ function badgeEmojiFor(id, meta) {
       position: 'fixed',
       top: getBarTopPosition(), // Start 30px lower (42px), move linearly to 12px
       right: `${BAR_RIGHT_DEFAULT_PX}px`,
-      zIndex: 2147483640, // Lower than max to allow notifications (toasts) to be on top
+      zIndex: 2147483647,
       display: 'flex',
       gap: '8px',
       padding: '0',
@@ -2982,6 +2995,36 @@ function badgeEmojiFor(id, meta) {
       flexDirection: 'column',
       // No transition - direct movement tied to scroll
     });
+    bar.style.setProperty('z-index', '2147483647', 'important');
+    if (!document.getElementById('sora-uv-controls-layer-style')) {
+      const layerStyle = document.createElement('style');
+      layerStyle.id = 'sora-uv-controls-layer-style';
+      layerStyle.textContent = `
+        .sora-uv-controls,
+        .sora-uv-controls * {
+          z-index: 2147483647 !important;
+        }
+      `;
+      document.head.appendChild(layerStyle);
+    }
+    const keepControlBarOnTop = () => {
+      try {
+        const root = document.documentElement;
+        if (!root || !document.contains(bar)) return;
+        if (root.lastElementChild !== bar) root.appendChild(bar);
+      } catch {}
+    };
+    let _topLayerRaf = null;
+    const topLayerObserver = new MutationObserver(() => {
+      if (_topLayerRaf) cancelAnimationFrame(_topLayerRaf);
+      _topLayerRaf = requestAnimationFrame(() => {
+        _topLayerRaf = null;
+        keepControlBarOnTop();
+      });
+    });
+    topLayerObserver.observe(document.documentElement, { childList: true });
+    bar._topLayerObserver = topLayerObserver;
+    bar._keepControlBarOnTop = keepControlBarOnTop;
     
     // Function to update feed selector button position based on scroll
     const updateFeedButtonPosition = () => {
@@ -3634,6 +3677,7 @@ function badgeEmojiFor(id, meta) {
     updateBarPosition();
 
     document.documentElement.appendChild(bar);
+    keepControlBarOnTop();
     controlBar = bar;
     return bar;
   }
@@ -3652,6 +3696,9 @@ function badgeEmojiFor(id, meta) {
     } catch {}
     try {
       if (bar._feedButtonObserver) bar._feedButtonObserver.disconnect();
+    } catch {}
+    try {
+      if (bar._topLayerObserver) bar._topLayerObserver.disconnect();
     } catch {}
     try {
       const timers = Array.isArray(bar._feedButtonTimers) ? bar._feedButtonTimers : [];
@@ -8226,8 +8273,12 @@ async function renderAnalyzeTable(force = false) {
       percent: 0,
       text: `Checking character feeds… ${idToPublicDownloadUrl.size} videos indexed`,
     });
+    setPublicBulkDownloadHydrationState(true);
     const profileUserId = await resolveProfileUserIdByHandle(profileHandle);
-    if (!profileUserId) return;
+    if (!profileUserId) {
+      setPublicBulkDownloadHydrationState(false);
+      return;
+    }
 
     const characterListUrl = new URL(`${location.origin}/backend/project_y/profile/${encodeURIComponent(profileUserId)}/characters`);
     characterListUrl.searchParams.set('limit', '30');
@@ -8309,6 +8360,7 @@ async function renderAnalyzeTable(force = false) {
           percent: pct,
           text: `Checking character ${feedUsersProcessed}/${totalCharacters} (${characterLabel}) • page ${feedPages} • ${idToPublicDownloadUrl.size} videos indexed`,
         });
+        setPublicBulkDownloadHydrationState(true);
         const nextUrl = new URL(feedUrlBase.toString());
         if (feedCursor) nextUrl.searchParams.set('cursor', feedCursor);
         let feedJson = null;
@@ -8339,6 +8391,7 @@ async function renderAnalyzeTable(force = false) {
       percent: 100,
       text: `Character hydration complete • ${idToPublicDownloadUrl.size} videos indexed`,
     });
+    setPublicBulkDownloadHydrationState(false);
     profileCharacterHydrationScopeKey = scopeKey;
   }
 
@@ -8790,9 +8843,7 @@ async function renderAnalyzeTable(force = false) {
         percent: 0,
         text: 'Preparing feed hydration…',
       });
-      if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Loading...');
-      if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(true);
-      if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = true;
+      setPublicBulkDownloadHydrationState(true);
 
       let totalItems = 0;
       let cursor = '';
@@ -8853,16 +8904,12 @@ async function renderAnalyzeTable(force = false) {
           usedCursor = true;
           cursor = nextCursor;
 
-          if (publicBulkDownloadBtn?.setLabel) {
-            publicBulkDownloadBtn.setLabel(`Load ${afterCount}...`);
-          }
+          setPublicBulkDownloadHydrationState(true);
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
       } finally {
         publicIndexHydrationInFlight = false;
-        if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel('Bulk DL');
-        if (publicBulkDownloadBtn?.setActive) publicBulkDownloadBtn.setActive(false);
-        if (publicBulkDownloadBtn) publicBulkDownloadBtn.disabled = false;
+        setPublicBulkDownloadHydrationState(false);
         setPublicHydrationStatus({
           visible: true,
           percent: 100,
