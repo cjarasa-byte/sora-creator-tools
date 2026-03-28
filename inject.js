@@ -3270,10 +3270,12 @@ function badgeEmojiFor(id, meta) {
     hydrationStatusWrap.className = 'sora-uv-public-hydration-status';
     Object.assign(hydrationStatusWrap.style, {
       display: 'none',
-      width: '100%',
+      width: 'min(260px, 100%)',
       flexDirection: 'column',
       gap: '5px',
       marginTop: '6px',
+      alignSelf: 'flex-end',
+      pointerEvents: 'none',
     });
 
     const hydrationTrack = document.createElement('div');
@@ -3309,7 +3311,6 @@ function badgeEmojiFor(id, meta) {
 
     hydrationStatusWrap.appendChild(hydrationTrack);
     hydrationStatusWrap.appendChild(hydrationText);
-    buttonRow.appendChild(hydrationStatusWrap);
     publicHydrationStatusWrapEl = hydrationStatusWrap;
     publicHydrationStatusTrackEl = hydrationTrack;
     publicHydrationStatusFillEl = hydrationFill;
@@ -3421,6 +3422,7 @@ function badgeEmojiFor(id, meta) {
     buttonRow.appendChild(bookmarksContainer);
 
     bar.appendChild(buttonRow);
+    bar.appendChild(hydrationStatusWrap);
 
     // Gather controls
     const gatherControlsWrapper = document.createElement('div');
