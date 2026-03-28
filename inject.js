@@ -8216,7 +8216,7 @@ async function renderAnalyzeTable(force = false) {
       cursor = next;
     }
 
-    const feedUsers = [{ userId: profileUserId, username: profileHandle }, ...characterUsers];
+    const feedUsers = [...characterUsers];
     const seenFeedUsers = new Set();
     for (const feedUser of feedUsers) {
       const targetUserId = typeof feedUser?.userId === 'string' ? feedUser.userId.trim() : '';
@@ -8224,7 +8224,7 @@ async function renderAnalyzeTable(force = false) {
       seenFeedUsers.add(targetUserId);
       const feedUrlBase = new URL(`${location.origin}/backend/project_y/profile_feed/${encodeURIComponent(targetUserId)}`);
       feedUrlBase.searchParams.set('limit', '8');
-      feedUrlBase.searchParams.set('cut', 'nf2');
+      feedUrlBase.searchParams.set('cut', profileFeedCutForUserId(targetUserId));
 
       let feedCursor = '';
       let feedPages = 0;
@@ -8257,6 +8257,11 @@ async function renderAnalyzeTable(force = false) {
     }
 
     profileCharacterHydrationScopeKey = scopeKey;
+  }
+
+  function profileFeedCutForUserId(userId) {
+    const id = typeof userId === 'string' ? userId.trim().toLowerCase() : '';
+    return id.startsWith('ch_') ? 'appearances' : 'nf2';
   }
 
   async function requestBackgroundDownload(url, filename, timeoutMs = 15000) {
