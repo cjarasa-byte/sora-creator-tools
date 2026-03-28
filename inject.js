@@ -8040,6 +8040,20 @@ async function renderAnalyzeTable(force = false) {
     writeScopedDownloadBucket(scopeKey, (bucket) => ({ ids: Array.from(bucket.ids || []), assets: Array.from(assetSet || []) }));
   }
 
+  function clearPublicDownloadedHistoryForScope(scopeKey = null) {
+    const scope = String(scopeKey || currentPublicDownloadScopeKey() || '').trim();
+    if (!scope) return false;
+    const scopes = readScopedPublicDownloads();
+    if (!scopes || typeof scopes !== 'object' || !scopes[scope]) return false;
+    delete scopes[scope];
+    try {
+      localStorage.setItem(PUBLIC_DOWNLOADS_SCOPED_KEY, JSON.stringify({ scopes }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function clearUVDraftsIndexedDBCache() {
     if (typeof indexedDB === 'undefined' || typeof indexedDB.open !== 'function') return false;
     return new Promise((resolve) => {
@@ -8750,8 +8764,31 @@ async function renderAnalyzeTable(force = false) {
       candidates = listPublicBulkDownloadCandidates();
     }
     if (!candidates.length) {
-      alert('No new downloadable public videos found on this page yet.');
-      return;
+      const indexedCount = idToPublicDownloadUrl.size;
+      if (indexedCount > 0) {
+        const scopeKey = currentPublicDownloadScopeKey();
+        const shouldResetHistory = confirm(
+          `Found ${indexedCount} indexed public video(s), but none are currently marked as new for this page.\n\n` +
+          'Reset this page\'s download history cache and try again?'
+        );
+        if (shouldResetHistory) {
+          const cleared = clearPublicDownloadedHistoryForScope(scopeKey);
+          if (!cleared) {
+            alert('Unable to reset download history cache for this page right now.');
+            return;
+          }
+          candidates = listPublicBulkDownloadCandidates();
+          if (!candidates.length) {
+            alert('Download history cache was reset, but there are still no downloadable public videos available yet.');
+            return;
+          }
+        } else {
+          return;
+        }
+      } else {
+        alert('No new downloadable public videos found on this page yet.');
+        return;
+      }
     }
     if (!confirm(`Download ${candidates.length} public video(s)?`)) return;
 

@@ -11401,7 +11401,7 @@ function makeTimeChart(canvas, tooltipSelector = '#viewsTooltip', yAxisLabel = '
             alert('Download cache cleared.');
           }
         } else {
-          alert('Unable to clear download cache right now.\n\nConsole fallback (run on https://sora.chatgpt.com):\nlocalStorage.removeItem("SORA_UV_PUBLIC_DOWNLOADS_V1"); localStorage.removeItem("SORA_UV_PUBLIC_DOWNLOADS_V2"); indexedDB.deleteDatabase("SoraUVDraftsDB");');
+          alert('Unable to clear download cache right now.\n\nConsole fallback (run on https://sora.chatgpt.com):\nlocalStorage.removeItem("SORA_UV_PUBLIC_DOWNLOADS_V1"); localStorage.removeItem("SORA_UV_PUBLIC_DOWNLOADS_V2"); indexedDB.deleteDatabase("SORA_UV_DRAFTS_CACHE");');
         }
         purgeClearDownloadCacheBtn.textContent = originalText;
         purgeClearDownloadCacheBtn.disabled = false;

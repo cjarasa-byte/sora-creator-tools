@@ -251,3 +251,44 @@ test('profileFeedCutForUserId uses appearances for character IDs and nf2 for use
   assert.equal(context.__fn(' user_123 '), 'nf2');
   assert.equal(context.__fn(''), 'nf2');
 });
+
+test('clearPublicDownloadedHistoryForScope removes only active scope entries', () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const readScopedStart = src.indexOf('  function readScopedPublicDownloads() {');
+  const clearScopeStart = src.indexOf('  function clearPublicDownloadedHistoryForScope(scopeKey = null) {', readScopedStart);
+  const clearScopeEnd = src.indexOf('  async function clearUVDraftsIndexedDBCache() {', clearScopeStart);
+  assert.notEqual(readScopedStart, -1, 'readScopedPublicDownloads start not found');
+  assert.notEqual(clearScopeStart, -1, 'clearPublicDownloadedHistoryForScope start not found');
+  assert.notEqual(clearScopeEnd, -1, 'clearPublicDownloadedHistoryForScope end not found');
+
+  const snippet = src.slice(readScopedStart, clearScopeEnd);
+  const store = {
+    SORA_UV_PUBLIC_DOWNLOADS_V2: JSON.stringify({
+      scopes: {
+        'profile:alpha': { ids: ['s_1'], assets: ['a_1'] },
+        'profile:beta': { ids: ['s_2'], assets: ['a_2'] },
+      },
+    }),
+  };
+  const context = vm.createContext({
+    PUBLIC_DOWNLOADS_SCOPED_KEY: 'SORA_UV_PUBLIC_DOWNLOADS_V2',
+    currentPublicDownloadScopeKey: () => 'profile:alpha',
+    localStorage: {
+      getItem(key) {
+        return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+      },
+      setItem(key, value) {
+        store[key] = String(value);
+      },
+    },
+  });
+  vm.runInContext(`${snippet}\nglobalThis.__fn = clearPublicDownloadedHistoryForScope;`, context, {
+    filename: 'inject-clear-public-download-history.harness.js',
+  });
+
+  assert.equal(context.__fn('profile:alpha'), true);
+  const parsed = JSON.parse(store.SORA_UV_PUBLIC_DOWNLOADS_V2);
+  assert.equal(parsed.scopes['profile:alpha'], undefined);
+  assert.deepEqual(parsed.scopes['profile:beta'], { ids: ['s_2'], assets: ['a_2'] });
+  assert.equal(context.__fn('profile:missing'), false);
+});
