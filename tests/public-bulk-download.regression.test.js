@@ -257,6 +257,62 @@ test('bulkDownloadFromManualList downloads every listed profile without confirma
   ]);
 });
 
+test('bulkDownloadPublicPosts auto-starts downloads when candidates are available', async () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const bulkStart = src.indexOf('  async function bulkDownloadPublicPosts() {');
+  const bulkEnd = src.indexOf('  function detectFeedNextCursor(payload) {', bulkStart);
+  assert.notEqual(bulkStart, -1, 'bulkDownloadPublicPosts start not found');
+  assert.notEqual(bulkEnd, -1, 'bulkDownloadPublicPosts end not found');
+  const snippet = src.slice(bulkStart, bulkEnd);
+
+  let confirmCalls = 0;
+  const downloads = [];
+  const markedIds = [];
+  const markedAssets = [];
+  const context = vm.createContext({
+    dlog: () => {},
+    currentPublicDownloadScopeKey: () => 'profile:alpha',
+    idToPublicDownloadUrl: new Map([['s_alpha', 'https://videos.openai.com/alpha.mp4']]),
+    hydratePublicVideoIndex: async () => {},
+    hydrateCharacterProfileVideoIndex: async () => {},
+    listPublicBulkDownloadCandidates: () => ([
+      { postId: 's_alpha', url: 'https://videos.openai.com/alpha.mp4', assetKey: 'https://videos.openai.com/alpha.mp4' },
+    ]),
+    hydratePublicCandidatesFromVisiblePostCards: async () => {},
+    clearPublicDownloadedHistoryForScope: () => true,
+    buildPublicDownloadPaths: (postId) => [`downloads/${postId}.mp4`],
+    requestBackgroundDownload: async (url, filename) => {
+      downloads.push({ url, filename });
+      return true;
+    },
+    markPublicPostDownloaded: (postId, scopeKey) => markedIds.push({ postId, scopeKey }),
+    markPublicAssetDownloaded: (assetKey, scopeKey) => markedAssets.push({ assetKey, scopeKey }),
+    publicBulkDownloadBtn: { disabled: false, setLabel: () => {}, setActive: () => {} },
+    confirm: () => {
+      confirmCalls += 1;
+      return true;
+    },
+    alert: () => {
+      throw new Error('unexpected alert');
+    },
+    console,
+    setTimeout,
+    clearTimeout,
+  });
+
+  vm.runInContext(`${snippet}\nglobalThis.__fn = bulkDownloadPublicPosts;`, context, {
+    filename: 'inject-public-bulk-download-auto-start.harness.js',
+  });
+  await context.__fn();
+
+  assert.equal(confirmCalls, 0);
+  assert.deepEqual(downloads, [
+    { url: 'https://videos.openai.com/alpha.mp4', filename: 'downloads/s_alpha.mp4' },
+  ]);
+  assert.deepEqual(markedIds, [{ postId: 's_alpha', scopeKey: 'profile:alpha' }]);
+  assert.deepEqual(markedAssets, [{ assetKey: 'https://videos.openai.com/alpha.mp4', scopeKey: 'profile:alpha' }]);
+});
+
 test('resolvePublicDownloadUrl falls back to attachment encoding source path', () => {
   const api = loadInjectPublicHelpers();
   const sample = {
