@@ -8859,16 +8859,86 @@ async function renderAnalyzeTable(force = false) {
     const downloadedIds = getPublicDownloadedIds(scopeKey);
     const downloadedAssetKeys = getPublicDownloadedAssetKeys(scopeKey);
     const seenAssetKeys = new Set();
-    const seenCursors = new Set();
     const out = [];
-    const feedUrlBase = new URL(`${location.origin}/backend/project_y/profile_feed/${encodeURIComponent(targetUserId)}`);
-    feedUrlBase.searchParams.set('limit', '8');
-    feedUrlBase.searchParams.set('cut', profileFeedCutForUserId(targetUserId));
+    const characterUserIds = await listCharacterUserIdsForProfileUser(targetUserId);
+    const feedUserIds = [targetUserId, ...characterUserIds];
+    for (const feedUserId of feedUserIds) {
+      const safeFeedUserId = typeof feedUserId === 'string' ? feedUserId.trim() : '';
+      if (!safeFeedUserId) continue;
+      const feedUrlBase = new URL(`${location.origin}/backend/project_y/profile_feed/${encodeURIComponent(safeFeedUserId)}`);
+      feedUrlBase.searchParams.set('limit', '8');
+      feedUrlBase.searchParams.set('cut', profileFeedCutForUserId(safeFeedUserId));
+      let cursor = '';
+      const seenCursors = new Set();
+      while (true) {
+        const url = new URL(feedUrlBase.toString());
+        if (cursor) url.searchParams.set('cursor', cursor);
+        const feedJson = await fetchProfileFeedPageWithRetry(url, safeHandle, safeFeedUserId, cursor);
+        processFeedJson(feedJson, { profileRootHandle: safeHandle });
+        const items = Array.isArray(feedJson?.items)
+          ? feedJson.items
+          : Array.isArray(feedJson?.data?.items)
+            ? feedJson.data.items
+            : [];
+        for (const item of items) {
+          const postId = normalizeId(item?.id || item?.post?.id || item?.post_id || '');
+          if (!postId) continue;
+          let mediaUrl = String(idToPublicDownloadUrl.get(postId) || '').trim();
+          if (!mediaUrl) {
+            mediaUrl = String(resolvePublicDownloadUrl(item) || '').trim();
+            if (mediaUrl) idToPublicDownloadUrl.set(postId, mediaUrl);
+          }
+          const assetKey = normalizeDownloadAssetKey(mediaUrl);
+          if (!mediaUrl || !assetKey) continue;
+          if (downloadedIds.has(postId)) continue;
+          if (downloadedAssetKeys.has(assetKey) || seenAssetKeys.has(assetKey)) continue;
+          seenAssetKeys.add(assetKey);
+          out.push({ postId, url: mediaUrl, assetKey, scopeKey });
+        }
+        const nextCursor = detectFeedNextCursor(feedJson);
+        if (!nextCursor || seenCursors.has(nextCursor)) break;
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+    }
+    return out;
+  }
+
+  async function listCharacterUserIdsForProfileUser(profileUserId) {
+    const safeProfileUserId = typeof profileUserId === 'string' ? profileUserId.trim() : '';
+    if (!safeProfileUserId) return [];
+    const characterListUrl = new URL(`${location.origin}/backend/project_y/profile/${encodeURIComponent(safeProfileUserId)}/characters`);
+    characterListUrl.searchParams.set('limit', '30');
+    const out = [];
+    const seenIds = new Set();
+    const seenCursors = new Set();
     let cursor = '';
-    while (seenCursors.size < 200) {
-      const url = new URL(feedUrlBase.toString());
-      if (cursor) url.searchParams.set('cursor', cursor);
-      let feedJson = null;
+    while (true) {
+      const nextUrl = new URL(characterListUrl.toString());
+      if (cursor) nextUrl.searchParams.set('cursor', cursor);
+      const payload = await fetchCharacterListPageWithRetry(nextUrl, safeProfileUserId, cursor);
+      processCharactersJson(payload);
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      for (const item of items) {
+        const charUserId = typeof item?.user_id === 'string' ? item.user_id.trim() : '';
+        if (!charUserId || seenIds.has(charUserId)) continue;
+        seenIds.add(charUserId);
+        out.push(charUserId);
+      }
+      const nextCursor = detectFeedNextCursor(payload);
+      if (!nextCursor || seenCursors.has(nextCursor)) break;
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    return out;
+  }
+
+  async function fetchProfileFeedPageWithRetry(url, profileHandle, feedUserId, cursor) {
+    const maxAttempts = 3;
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       let timeoutId = null;
       try {
         const controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -8883,46 +8953,47 @@ async function renderAnalyzeTable(force = false) {
           headers: buildBackendJsonHeaders(),
           signal: controller ? controller.signal : undefined,
         });
-        if (!response.ok) break;
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-        if (!contentType.includes('json')) break;
-        feedJson = await response.json();
-      } catch {
-        break;
+        if (!contentType.includes('json')) throw new Error(`Unexpected content-type: ${contentType || 'unknown'}`);
+        return await response.json();
+      } catch (err) {
+        lastError = err;
       } finally {
         if (timeoutId != null) clearTimeout(timeoutId);
       }
-      processFeedJson(feedJson, { profileRootHandle: safeHandle });
-      const items = Array.isArray(feedJson?.items)
-        ? feedJson.items
-        : Array.isArray(feedJson?.data?.items)
-          ? feedJson.data.items
-          : [];
-      for (const item of items) {
-        const postId = normalizeId(item?.id || item?.post?.id || item?.post_id || '');
-        if (!postId) continue;
-        let mediaUrl = String(idToPublicDownloadUrl.get(postId) || '').trim();
-        if (!mediaUrl) {
-          mediaUrl = String(resolvePublicDownloadUrl(item) || '').trim();
-          if (mediaUrl) idToPublicDownloadUrl.set(postId, mediaUrl);
-        }
-        const assetKey = normalizeDownloadAssetKey(mediaUrl);
-        if (!mediaUrl || !assetKey) continue;
-        if (downloadedIds.has(postId)) continue;
-        if (downloadedAssetKeys.has(assetKey) || seenAssetKeys.has(assetKey)) continue;
-        seenAssetKeys.add(assetKey);
-        out.push({ postId, url: mediaUrl, assetKey, scopeKey });
-      }
-      const nextCursor = detectFeedNextCursor(feedJson);
-      if (!nextCursor || seenCursors.has(nextCursor)) break;
-      seenCursors.add(nextCursor);
-      cursor = nextCursor;
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 160 * attempt));
     }
-    return out;
+    const cursorLabel = cursor ? `cursor ${cursor}` : 'initial page';
+    const reason = String(lastError?.message || lastError || 'unknown');
+    throw new Error(`Failed feed fetch for @${profileHandle} (${feedUserId}, ${cursorLabel}) after ${maxAttempts} attempts: ${reason}`);
   }
 
-  function dedupeManualListCandidates(candidates, maxCandidates = 4000) {
+  async function fetchCharacterListPageWithRetry(url, profileUserId, cursor) {
+    const maxAttempts = 3;
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const response = await fetch(url.toString(), {
+          method: 'GET',
+          credentials: 'include',
+          headers: buildBackendJsonHeaders(),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.includes('json')) throw new Error(`Unexpected content-type: ${contentType || 'unknown'}`);
+        return await response.json();
+      } catch (err) {
+        lastError = err;
+      }
+      if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 160 * attempt));
+    }
+    const cursorLabel = cursor ? `cursor ${cursor}` : 'initial page';
+    const reason = String(lastError?.message || lastError || 'unknown');
+    throw new Error(`Failed character list fetch for ${profileUserId} (${cursorLabel}) after 3 attempts: ${reason}`);
+  }
+
+  function dedupeManualListCandidates(candidates) {
     const out = [];
     const seenPosts = new Set();
     const seenAssets = new Set();
@@ -8940,7 +9011,6 @@ async function renderAnalyzeTable(force = false) {
         assetKey,
         scopeKey: typeof candidate?.scopeKey === 'string' ? candidate.scopeKey : '',
       });
-      if (out.length >= maxCandidates) break;
     }
     return out;
   }
@@ -8963,6 +9033,7 @@ async function renderAnalyzeTable(force = false) {
       const allCandidates = [];
       const failures = [];
       const errored = [];
+      const erroredDetails = [];
       for (const profile of profiles) {
         const profileHandle = String(profile?.profileHandle || '').trim();
         if (!profileHandle) continue;
@@ -8974,30 +9045,18 @@ async function renderAnalyzeTable(force = false) {
         } catch (err) {
           console.error('[SoraUV] Failed to resolve list profile:', profileHandle, err);
           errored.push(profileHandle);
+          erroredDetails.push(`${profileHandle}: ${String(err?.message || err || 'unknown')}`);
         }
       }
       const candidates = dedupeManualListCandidates(allCandidates);
-      if (!candidates.length) {
-        const details = [];
-        if (failures.length) details.push(`No new downloadable assets were found for: ${failures.join(', ')}.`);
-        if (errored.length) details.push(`Some profiles failed to resolve: ${errored.join(', ')}.`);
-        alert(details.length ? details.join('\n\n') : 'No new downloadable assets were resolved from that list.');
-        return;
-      }
       if (allCandidates.length > candidates.length) {
         console.info('[SoraUV] Manual list candidate dedupe trimmed entries:', {
           before: allCandidates.length,
           after: candidates.length,
         });
       }
-      if (candidates.length >= 4000) {
-        console.info('[SoraUV] List DL auto-continuing large batch without confirmation:', {
-          count: candidates.length,
-          profiles: profiles.length,
-        });
-      }
-
       if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel(`List ${candidates.length}...`);
+      let downloadedCount = 0;
       for (const candidate of candidates) {
         try {
           const filepaths = buildPublicDownloadPaths(candidate.postId);
@@ -9007,6 +9066,7 @@ async function renderAnalyzeTable(force = false) {
             downloaded = downloaded || ok;
           }
           if (!downloaded) continue;
+          downloadedCount += 1;
           const scopeKey = typeof candidate.scopeKey === 'string' && candidate.scopeKey.trim()
             ? candidate.scopeKey.trim()
             : currentPublicDownloadScopeKey();
@@ -9017,6 +9077,12 @@ async function renderAnalyzeTable(force = false) {
         }
         await new Promise((resolve) => setTimeout(resolve, 120));
       }
+      const summaryParts = [`List DL complete: downloaded ${downloadedCount}/${candidates.length} new video(s) across ${profiles.length} profile(s).`];
+      if (failures.length) summaryParts.push(`No new videos for: ${failures.join(', ')}.`);
+      if (errored.length) summaryParts.push(`Failed profiles after retries: ${errored.join(', ')}.`);
+      const summary = summaryParts.join(' ');
+      console.info('[SoraUV]', summary, erroredDetails.length ? { errors: erroredDetails } : undefined);
+      if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel(`${downloadedCount} downloaded`);
     } finally {
       if (publicListDownloadBtn?.setLabel) publicListDownloadBtn.setLabel('List DL');
       if (publicListDownloadBtn?.setActive) publicListDownloadBtn.setActive(false);

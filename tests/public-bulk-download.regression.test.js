@@ -90,11 +90,15 @@ test('parseManualPublicDownloadList accepts profile inputs and ignores post urls
 
 test('listProfileBulkDownloadCandidates gathers profile feed entries and scopes history by profile handle', async () => {
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const profileCutStart = src.indexOf('  function profileFeedCutForUserId(userId) {');
+  const profileCutEnd = src.indexOf('  async function requestBackgroundDownload(url, filename, timeoutMs = 15000) {', profileCutStart);
   const listStart = src.indexOf('  async function listProfileBulkDownloadCandidates(profileHandle) {');
   const listEnd = src.indexOf('  async function bulkDownloadFromManualList() {', listStart);
+  assert.notEqual(profileCutStart, -1, 'profileFeedCutForUserId start not found');
+  assert.notEqual(profileCutEnd, -1, 'profileFeedCutForUserId end not found');
   assert.notEqual(listStart, -1, 'listProfileBulkDownloadCandidates start not found');
   assert.notEqual(listEnd, -1, 'listProfileBulkDownloadCandidates end not found');
-  const snippet = src.slice(listStart, listEnd);
+  const snippet = `${src.slice(profileCutStart, profileCutEnd)}\n${src.slice(listStart, listEnd)}`;
   const historyScopes = [];
   const context = vm.createContext({
     URL,
@@ -106,26 +110,36 @@ test('listProfileBulkDownloadCandidates gathers profile feed entries and scopes 
       return new Set(['s_seen']);
     },
     getPublicDownloadedAssetKeys: () => new Set(['https://videos.openai.com/already.mp4']),
-    profileFeedCutForUserId: () => 'nf2',
-    buildBackendJsonHeaders: () => ({}),
     processFeedJson: () => {},
+    processCharactersJson: () => {},
+    buildBackendJsonHeaders: () => ({}),
     normalizeId: (v) => String(v || '').trim(),
     resolvePublicDownloadUrl: (item) => String(item?.downloadUrl || ''),
     normalizeDownloadAssetKey: (url) => String(url || '').split('?')[0].toLowerCase(),
     detectFeedNextCursor: (json) => json?.next_cursor || null,
     fetch: async (url) => {
       const parsed = new URL(String(url));
+      if (parsed.pathname.includes('/characters')) {
+        return {
+          ok: true,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ items: [{ user_id: 'ch_alpha_1' }], next_cursor: null }),
+        };
+      }
+      const userId = parsed.pathname.split('/').pop();
       const cursor = parsed.searchParams.get('cursor');
-      const items = cursor
-        ? [{ id: 's_seen', downloadUrl: 'https://videos.openai.com/skip.mp4' }]
-        : [
-            { id: 's_1', downloadUrl: 'https://videos.openai.com/a.mp4?token=123' },
-            { id: 's_2', downloadUrl: 'https://videos.openai.com/already.mp4' },
-          ];
+      const items = userId === 'usr_alpha'
+        ? (cursor
+            ? [{ id: 's_seen', downloadUrl: 'https://videos.openai.com/skip.mp4' }]
+            : [
+                { id: 's_1', downloadUrl: 'https://videos.openai.com/a.mp4?token=123' },
+                { id: 's_2', downloadUrl: 'https://videos.openai.com/already.mp4' },
+              ])
+        : [{ id: 's_char_1', downloadUrl: 'https://videos.openai.com/char.mp4?token=123' }];
       return {
         ok: true,
         headers: { get: () => 'application/json' },
-        json: async () => ({ items, next_cursor: cursor ? null : 'cursor_2' }),
+        json: async () => ({ items, next_cursor: userId === 'usr_alpha' && !cursor ? 'cursor_2' : null }),
       };
     },
     setTimeout,
@@ -141,17 +155,23 @@ test('listProfileBulkDownloadCandidates gathers profile feed entries and scopes 
       assetKey: 'https://videos.openai.com/a.mp4',
       scopeKey: 'profile:alpha',
     },
+    {
+      postId: 's_char_1',
+      url: 'https://videos.openai.com/char.mp4?token=123',
+      assetKey: 'https://videos.openai.com/char.mp4',
+      scopeKey: 'profile:alpha',
+    },
   ]);
   assert.deepEqual(historyScopes, ['profile:alpha']);
 });
 
-test('dedupeManualListCandidates removes repeated posts/assets and caps oversized batches', () => {
+test('dedupeManualListCandidates removes repeated posts/assets without imposing hard caps', () => {
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
   const normalizeIdStart = src.indexOf('  const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();');
   const normalizeIdEnd = src.indexOf('  const getUniqueViews =', normalizeIdStart);
   const normalizeAssetStart = src.indexOf('  function normalizeDownloadAssetKey(url) {');
   const normalizeAssetEnd = src.indexOf('  function buildPublicDownloadPath(postId) {', normalizeAssetStart);
-  const dedupeStart = src.indexOf('  function dedupeManualListCandidates(candidates, maxCandidates = 4000) {');
+  const dedupeStart = src.indexOf('  function dedupeManualListCandidates(candidates) {');
   const dedupeEnd = src.indexOf('  async function bulkDownloadFromManualList() {', dedupeStart);
   assert.notEqual(normalizeIdStart, -1, 'normalizeId start not found');
   assert.notEqual(normalizeIdEnd, -1, 'normalizeId end not found');
@@ -173,7 +193,7 @@ test('dedupeManualListCandidates removes repeated posts/assets and caps oversize
     { postId: 's_1', url: 'https://videos.openai.com/a.mp4?token=2', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:a' }, // duplicate post
     { postId: 's_2', url: 'https://videos.openai.com/a.mp4?token=3', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:b' }, // duplicate asset
     { postId: 's_3', url: 'https://videos.openai.com/c.mp4', scopeKey: 'profile:c' },
-  ], 2)));
+  ])));
   assert.deepEqual(result, [
     { postId: 's_1', url: 'https://videos.openai.com/a.mp4?token=1', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:a' },
     { postId: 's_3', url: 'https://videos.openai.com/c.mp4', assetKey: 'https://videos.openai.com/c.mp4', scopeKey: 'profile:c' },
@@ -193,6 +213,7 @@ test('bulkDownloadFromManualList downloads every listed profile without confirma
   const markedIds = [];
   const markedAssets = [];
   let confirmCalls = 0;
+  let alertCalls = 0;
 
   const context = vm.createContext({
     parseManualPublicDownloadList: () => ([
@@ -228,9 +249,7 @@ test('bulkDownloadFromManualList downloads every listed profile without confirma
       confirmCalls += 1;
       return true;
     },
-    alert: () => {
-      throw new Error('unexpected alert');
-    },
+    alert: () => { alertCalls += 1; },
     console,
     setTimeout,
     clearTimeout,
@@ -255,6 +274,7 @@ test('bulkDownloadFromManualList downloads every listed profile without confirma
     { assetKey: 'https://videos.openai.com/alpha.mp4', scopeKey: 'profile:alpha' },
     { assetKey: 'https://videos.openai.com/beta.mp4', scopeKey: 'profile:beta' },
   ]);
+  assert.equal(alertCalls, 0);
 });
 
 test('bulkDownloadPublicPosts auto-starts downloads when candidates are available', async () => {
