@@ -257,6 +257,62 @@ test('bulkDownloadFromManualList downloads every listed profile without confirma
   ]);
 });
 
+test('bulkDownloadPublicPosts auto-starts downloads when candidates are available', async () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const bulkStart = src.indexOf('  async function bulkDownloadPublicPosts() {');
+  const bulkEnd = src.indexOf('  function detectFeedNextCursor(payload) {', bulkStart);
+  assert.notEqual(bulkStart, -1, 'bulkDownloadPublicPosts start not found');
+  assert.notEqual(bulkEnd, -1, 'bulkDownloadPublicPosts end not found');
+  const snippet = src.slice(bulkStart, bulkEnd);
+
+  let confirmCalls = 0;
+  const downloads = [];
+  const markedIds = [];
+  const markedAssets = [];
+  const context = vm.createContext({
+    dlog: () => {},
+    currentPublicDownloadScopeKey: () => 'profile:alpha',
+    idToPublicDownloadUrl: new Map([['s_alpha', 'https://videos.openai.com/alpha.mp4']]),
+    hydratePublicVideoIndex: async () => {},
+    hydrateCharacterProfileVideoIndex: async () => {},
+    listPublicBulkDownloadCandidates: () => ([
+      { postId: 's_alpha', url: 'https://videos.openai.com/alpha.mp4', assetKey: 'https://videos.openai.com/alpha.mp4' },
+    ]),
+    hydratePublicCandidatesFromVisiblePostCards: async () => {},
+    clearPublicDownloadedHistoryForScope: () => true,
+    buildPublicDownloadPaths: (postId) => [`downloads/${postId}.mp4`],
+    requestBackgroundDownload: async (url, filename) => {
+      downloads.push({ url, filename });
+      return true;
+    },
+    markPublicPostDownloaded: (postId, scopeKey) => markedIds.push({ postId, scopeKey }),
+    markPublicAssetDownloaded: (assetKey, scopeKey) => markedAssets.push({ assetKey, scopeKey }),
+    publicBulkDownloadBtn: { disabled: false, setLabel: () => {}, setActive: () => {} },
+    confirm: () => {
+      confirmCalls += 1;
+      return true;
+    },
+    alert: () => {
+      throw new Error('unexpected alert');
+    },
+    console,
+    setTimeout,
+    clearTimeout,
+  });
+
+  vm.runInContext(`${snippet}\nglobalThis.__fn = bulkDownloadPublicPosts;`, context, {
+    filename: 'inject-public-bulk-download-auto-start.harness.js',
+  });
+  await context.__fn();
+
+  assert.equal(confirmCalls, 0);
+  assert.deepEqual(downloads, [
+    { url: 'https://videos.openai.com/alpha.mp4', filename: 'downloads/s_alpha.mp4' },
+  ]);
+  assert.deepEqual(markedIds, [{ postId: 's_alpha', scopeKey: 'profile:alpha' }]);
+  assert.deepEqual(markedAssets, [{ assetKey: 'https://videos.openai.com/alpha.mp4', scopeKey: 'profile:alpha' }]);
+});
+
 test('resolvePublicDownloadUrl falls back to attachment encoding source path', () => {
   const api = loadInjectPublicHelpers();
   const sample = {
@@ -449,6 +505,40 @@ test('profileFeedCutForUserId uses appearances for character IDs and nf2 for use
   assert.equal(context.__fn('ch_692fba0fc1f8819181df844655140c99'), 'appearances');
   assert.equal(context.__fn(' user_123 '), 'nf2');
   assert.equal(context.__fn(''), 'nf2');
+});
+
+test('resolveActiveProfileIdentity resolves personal /profile route via backend profile endpoint', async () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const fnStart = src.indexOf('  async function resolveActiveProfileIdentity() {');
+  const fnEnd = src.indexOf('  async function hydrateCharacterProfileVideoIndex() {', fnStart);
+  assert.notEqual(fnStart, -1, 'resolveActiveProfileIdentity start not found');
+  assert.notEqual(fnEnd, -1, 'resolveActiveProfileIdentity end not found');
+  const snippet = src.slice(fnStart, fnEnd);
+
+  let resolveByHandleCalls = 0;
+  const context = vm.createContext({
+    currentProfileHandleFromURL: () => null,
+    location: { origin: 'https://sora.chatgpt.com' },
+    buildBackendJsonHeaders: () => ({ 'content-type': 'application/json' }),
+    resolveProfileUserIdByHandle: async () => {
+      resolveByHandleCalls += 1;
+      return 'usr_from_handle';
+    },
+    fetch: async () => ({
+      ok: true,
+      headers: { get: () => 'application/json; charset=utf-8' },
+      json: async () => ({
+        profile: { username: 'my_handle', user_id: 'usr_me' },
+      }),
+    }),
+  });
+  vm.runInContext(`${snippet}\nglobalThis.__fn = resolveActiveProfileIdentity;`, context, {
+    filename: 'inject-profile-identity.harness.js',
+  });
+
+  const result = JSON.parse(JSON.stringify(await context.__fn()));
+  assert.deepEqual(result, { profileHandle: 'my_handle', profileUserId: 'usr_me' });
+  assert.equal(resolveByHandleCalls, 0);
 });
 
 test('clearPublicDownloadedHistoryForScope removes only active scope entries', () => {

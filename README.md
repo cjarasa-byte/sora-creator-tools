@@ -144,6 +144,30 @@ node --test tests/*.test.js
 for f in *.js tests/*.js; do node --check "$f"; done
 ```
 
+### Enable debug logging (including Bulk DL)
+
+In the Sora tab DevTools console, enable debug topics via localStorage, then refresh:
+
+```js
+localStorage.setItem('SORA_UV_DEBUG', 'bulkdl');
+location.reload();
+```
+
+- Use comma-separated topics (for example: `feed,analyze,bulkdl,drafts`), or `all` to enable every topic.
+- Disable debugging with:
+
+```js
+localStorage.removeItem('SORA_UV_DEBUG');
+location.reload();
+```
+
+You can also use helper methods from the page console:
+
+```js
+window.__soraDebug.setDebug('bulkdl'); // then refresh
+window.__soraDebug.clearDebug();       // then refresh
+```
+
 ### Whitespace/error check before commit
 
 ```bash

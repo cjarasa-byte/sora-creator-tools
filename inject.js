@@ -29,7 +29,48 @@
   } catch {}
 
   // Debug toggles
-  const DEBUG = { feed: false, thumbs: false, analyze: false, drafts: false };
+  const DEBUG_STORAGE_KEY = 'SORA_UV_DEBUG';
+  const DEBUG = { feed: false, thumbs: false, analyze: false, drafts: false, bulkdl: false, characters: false };
+  const DEBUG_TOPICS = Object.keys(DEBUG);
+  function parseDebugTopics(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return null;
+    const normalized = text.toLowerCase();
+    if (normalized === '1' || normalized === 'true' || normalized === 'all' || normalized === '*') {
+      return new Set(DEBUG_TOPICS);
+    }
+    const topics = new Set();
+    for (const part of normalized.split(/[,\s]+/)) {
+      const token = part.trim();
+      if (!token) continue;
+      if (token === 'all' || token === '*') {
+        return new Set(DEBUG_TOPICS);
+      }
+      if (DEBUG_TOPICS.includes(token)) topics.add(token);
+    }
+    return topics;
+  }
+  function resolveDebugTopics() {
+    let fromStorage = null;
+    try {
+      fromStorage = parseDebugTopics(localStorage.getItem(DEBUG_STORAGE_KEY));
+    } catch {}
+    if (fromStorage && fromStorage.size) return fromStorage;
+    try {
+      const url = new URL(location.href);
+      const fromQuery = parseDebugTopics(url.searchParams.get('sora_uv_debug'));
+      if (fromQuery && fromQuery.size) return fromQuery;
+    } catch {}
+    return new Set();
+  }
+  (function applyDebugTopics() {
+    const enabledTopics = resolveDebugTopics();
+    for (const topic of DEBUG_TOPICS) DEBUG[topic] = enabledTopics.has(topic);
+    if (!enabledTopics.size) return;
+    try {
+      console.info('[SoraUV] Debug topics enabled:', Array.from(enabledTopics).sort().join(', '));
+    } catch {}
+  })();
   const dlog = (topic, ...args) => {
     try {
       if (DEBUG[topic]) console.log('[SoraUV]', topic, ...args);
@@ -64,9 +105,6 @@
   const MIN_PER_Y = 525600;
   const HOT_FLAME_MAX_AGE_MIN = 3 * MIN_PER_D; // Flames apply within first 3 days
   const ANALYZE_EXPIRES_WINDOW_MIN = 24 * MIN_PER_H; // Expires column always counts down to 24h post age
-
-  // Debug toggle for characters
-  DEBUG.characters = false;
 
   // == State Maps ==
   const idToUnique = new Map();
@@ -8293,23 +8331,70 @@ async function renderAnalyzeTable(force = false) {
     return null;
   }
 
+  async function resolveActiveProfileIdentity() {
+    const handleFromUrl = currentProfileHandleFromURL();
+    const normalizedHandle = typeof handleFromUrl === 'string' ? handleFromUrl.trim() : '';
+    if (normalizedHandle) {
+      return {
+        profileHandle: normalizedHandle,
+        profileUserId: await resolveProfileUserIdByHandle(normalizedHandle),
+      };
+    }
+
+    // Personal profile route can be /profile (without /profile/<handle>).
+    // In that case, resolve identity from the "current profile" backend endpoint.
+    try {
+      const response = await fetch(`${location.origin}/backend/project_y/profile`, {
+        method: 'GET',
+        credentials: 'include',
+        headers: buildBackendJsonHeaders(),
+      });
+      if (!response.ok) return { profileHandle: '', profileUserId: null };
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('json')) return { profileHandle: '', profileUserId: null };
+      const payload = await response.json();
+      const profile = payload?.profile || payload?.data?.profile || payload?.owner_profile || payload;
+      const extractedHandle = (
+        profile?.handle ||
+        profile?.username ||
+        payload?.username ||
+        payload?.handle ||
+        ''
+      );
+      let extractedUserId = (
+        profile?.user_id ||
+        profile?.id ||
+        payload?.user_id ||
+        payload?.id ||
+        null
+      );
+      const profileHandle = typeof extractedHandle === 'string' ? extractedHandle.trim() : '';
+      if (typeof extractedUserId === 'string') extractedUserId = extractedUserId.trim();
+      if ((!extractedUserId || typeof extractedUserId !== 'string') && profileHandle) {
+        extractedUserId = await resolveProfileUserIdByHandle(profileHandle);
+      }
+      return {
+        profileHandle,
+        profileUserId: typeof extractedUserId === 'string' && extractedUserId ? extractedUserId : null,
+      };
+    } catch {}
+    return { profileHandle: '', profileUserId: null };
+  }
+
   async function hydrateCharacterProfileVideoIndex() {
     if (!isProfile()) return;
     const scopeKey = currentPublicIndexScopeKey();
     if (profileCharacterHydrationScopeKey === scopeKey) return;
-    const profileHandle = currentProfileHandleFromURL();
-    if (!profileHandle) return;
+    const profileIdentity = await resolveActiveProfileIdentity();
+    const profileHandle = profileIdentity?.profileHandle || '';
+    const profileUserId = profileIdentity?.profileUserId || null;
+    if (!profileUserId) return;
     setPublicHydrationStatus({
       visible: true,
       percent: 0,
       text: `Checking character feeds… ${idToPublicDownloadUrl.size} videos indexed`,
     });
     setPublicBulkDownloadHydrationState(true);
-    const profileUserId = await resolveProfileUserIdByHandle(profileHandle);
-    if (!profileUserId) {
-      setPublicBulkDownloadHydrationState(false);
-      return;
-    }
 
     const characterListUrl = new URL(`${location.origin}/backend/project_y/profile/${encodeURIComponent(profileUserId)}/characters`);
     characterListUrl.searchParams.set('limit', '30');
@@ -8971,6 +9056,10 @@ async function renderAnalyzeTable(force = false) {
 
   async function bulkDownloadPublicPosts() {
     try {
+      dlog('bulkdl', 'bulkDownloadPublicPosts:start', {
+        scope: currentPublicDownloadScopeKey(),
+        indexed: idToPublicDownloadUrl.size,
+      });
       // First hydrate the public feed index directly from paginated backend endpoints.
       // This avoids requiring full-page media rendering/scrolling before bulk download.
       await hydratePublicVideoIndex();
@@ -8979,9 +9068,11 @@ async function renderAnalyzeTable(force = false) {
       // Download every post we've indexed from feed pagination.
       // This supports large profile/explore sessions where users scroll through 1k+ videos.
       let candidates = listPublicBulkDownloadCandidates();
+      dlog('bulkdl', 'bulkDownloadPublicPosts:candidates_after_hydrate', candidates.length);
       if (!candidates.length) {
         await hydratePublicCandidatesFromVisiblePostCards();
         candidates = listPublicBulkDownloadCandidates();
+        dlog('bulkdl', 'bulkDownloadPublicPosts:candidates_after_visible_cards', candidates.length);
       }
       if (!candidates.length) {
         const indexedCount = idToPublicDownloadUrl.size;
@@ -8998,6 +9089,7 @@ async function renderAnalyzeTable(force = false) {
               return;
             }
             candidates = listPublicBulkDownloadCandidates();
+            dlog('bulkdl', 'bulkDownloadPublicPosts:candidates_after_history_reset', candidates.length);
             if (!candidates.length) {
               alert('Download history cache was reset, but there are still no downloadable public videos available yet.');
               return;
@@ -9010,7 +9102,9 @@ async function renderAnalyzeTable(force = false) {
           return;
         }
       }
-      if (!confirm(`Download ${candidates.length} public video(s)?`)) return;
+      dlog('bulkdl', 'bulkDownloadPublicPosts:starting_downloads', {
+        count: candidates.length,
+      });
 
       const scopeKey = currentPublicDownloadScopeKey();
       if (publicBulkDownloadBtn?.setLabel) publicBulkDownloadBtn.setLabel(`DL ${candidates.length}...`);
@@ -9027,6 +9121,10 @@ async function renderAnalyzeTable(force = false) {
           if (!downloaded) continue;
           markPublicPostDownloaded(candidate.postId, scopeKey);
           markPublicAssetDownloaded(candidate.assetKey, scopeKey);
+          dlog('bulkdl', 'bulkDownloadPublicPosts:downloaded', {
+            postId: candidate.postId,
+            assetKey: candidate.assetKey,
+          });
         } catch (err) {
           console.error('[SoraUV] Public bulk download failed:', candidate.postId, err);
         }
@@ -9758,9 +9856,29 @@ async function renderAnalyzeTable(force = false) {
     }
   }
 
-  // Debug helper - only available when DEBUG.drafts is enabled
+  // Debug helper
+  window.__soraDebug = {
+    DEBUG_STORAGE_KEY,
+    debugTopics: DEBUG_TOPICS,
+    setDebug(topics = 'all') {
+      try {
+        localStorage.setItem(DEBUG_STORAGE_KEY, String(topics));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    clearDebug() {
+      try {
+        localStorage.removeItem(DEBUG_STORAGE_KEY);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
   if (DEBUG.drafts) {
-    window.__soraDebug = {
+    Object.assign(window.__soraDebug, {
       idToDuration,
       idToPrompt,
       idToDownloadUrl,
@@ -9774,7 +9892,7 @@ async function renderAnalyzeTable(force = false) {
       isDrafts,
       processDraftsJson,
       getBookmarks,
-    };
+    });
   }
 
   if (document.readyState === 'loading') {
