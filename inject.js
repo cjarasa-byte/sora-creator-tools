@@ -8331,23 +8331,70 @@ async function renderAnalyzeTable(force = false) {
     return null;
   }
 
+  async function resolveActiveProfileIdentity() {
+    const handleFromUrl = currentProfileHandleFromURL();
+    const normalizedHandle = typeof handleFromUrl === 'string' ? handleFromUrl.trim() : '';
+    if (normalizedHandle) {
+      return {
+        profileHandle: normalizedHandle,
+        profileUserId: await resolveProfileUserIdByHandle(normalizedHandle),
+      };
+    }
+
+    // Personal profile route can be /profile (without /profile/<handle>).
+    // In that case, resolve identity from the "current profile" backend endpoint.
+    try {
+      const response = await fetch(`${location.origin}/backend/project_y/profile`, {
+        method: 'GET',
+        credentials: 'include',
+        headers: buildBackendJsonHeaders(),
+      });
+      if (!response.ok) return { profileHandle: '', profileUserId: null };
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('json')) return { profileHandle: '', profileUserId: null };
+      const payload = await response.json();
+      const profile = payload?.profile || payload?.data?.profile || payload?.owner_profile || payload;
+      const extractedHandle = (
+        profile?.handle ||
+        profile?.username ||
+        payload?.username ||
+        payload?.handle ||
+        ''
+      );
+      let extractedUserId = (
+        profile?.user_id ||
+        profile?.id ||
+        payload?.user_id ||
+        payload?.id ||
+        null
+      );
+      const profileHandle = typeof extractedHandle === 'string' ? extractedHandle.trim() : '';
+      if (typeof extractedUserId === 'string') extractedUserId = extractedUserId.trim();
+      if ((!extractedUserId || typeof extractedUserId !== 'string') && profileHandle) {
+        extractedUserId = await resolveProfileUserIdByHandle(profileHandle);
+      }
+      return {
+        profileHandle,
+        profileUserId: typeof extractedUserId === 'string' && extractedUserId ? extractedUserId : null,
+      };
+    } catch {}
+    return { profileHandle: '', profileUserId: null };
+  }
+
   async function hydrateCharacterProfileVideoIndex() {
     if (!isProfile()) return;
     const scopeKey = currentPublicIndexScopeKey();
     if (profileCharacterHydrationScopeKey === scopeKey) return;
-    const profileHandle = currentProfileHandleFromURL();
-    if (!profileHandle) return;
+    const profileIdentity = await resolveActiveProfileIdentity();
+    const profileHandle = profileIdentity?.profileHandle || '';
+    const profileUserId = profileIdentity?.profileUserId || null;
+    if (!profileUserId) return;
     setPublicHydrationStatus({
       visible: true,
       percent: 0,
       text: `Checking character feeds… ${idToPublicDownloadUrl.size} videos indexed`,
     });
     setPublicBulkDownloadHydrationState(true);
-    const profileUserId = await resolveProfileUserIdByHandle(profileHandle);
-    if (!profileUserId) {
-      setPublicBulkDownloadHydrationState(false);
-      return;
-    }
 
     const characterListUrl = new URL(`${location.origin}/backend/project_y/profile/${encodeURIComponent(profileUserId)}/characters`);
     characterListUrl.searchParams.set('limit', '30');

@@ -507,6 +507,40 @@ test('profileFeedCutForUserId uses appearances for character IDs and nf2 for use
   assert.equal(context.__fn(''), 'nf2');
 });
 
+test('resolveActiveProfileIdentity resolves personal /profile route via backend profile endpoint', async () => {
+  const src = fs.readFileSync(INJECT_PATH, 'utf8');
+  const fnStart = src.indexOf('  async function resolveActiveProfileIdentity() {');
+  const fnEnd = src.indexOf('  async function hydrateCharacterProfileVideoIndex() {', fnStart);
+  assert.notEqual(fnStart, -1, 'resolveActiveProfileIdentity start not found');
+  assert.notEqual(fnEnd, -1, 'resolveActiveProfileIdentity end not found');
+  const snippet = src.slice(fnStart, fnEnd);
+
+  let resolveByHandleCalls = 0;
+  const context = vm.createContext({
+    currentProfileHandleFromURL: () => null,
+    location: { origin: 'https://sora.chatgpt.com' },
+    buildBackendJsonHeaders: () => ({ 'content-type': 'application/json' }),
+    resolveProfileUserIdByHandle: async () => {
+      resolveByHandleCalls += 1;
+      return 'usr_from_handle';
+    },
+    fetch: async () => ({
+      ok: true,
+      headers: { get: () => 'application/json; charset=utf-8' },
+      json: async () => ({
+        profile: { username: 'my_handle', user_id: 'usr_me' },
+      }),
+    }),
+  });
+  vm.runInContext(`${snippet}\nglobalThis.__fn = resolveActiveProfileIdentity;`, context, {
+    filename: 'inject-profile-identity.harness.js',
+  });
+
+  const result = JSON.parse(JSON.stringify(await context.__fn()));
+  assert.deepEqual(result, { profileHandle: 'my_handle', profileUserId: 'usr_me' });
+  assert.equal(resolveByHandleCalls, 0);
+});
+
 test('clearPublicDownloadedHistoryForScope removes only active scope entries', () => {
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
   const readScopedStart = src.indexOf('  function readScopedPublicDownloads() {');
