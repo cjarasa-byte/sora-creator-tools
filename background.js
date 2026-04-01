@@ -223,6 +223,46 @@ function sanitizeDownloadFilename(value) {
   return safe.join('/');
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeDownloadLookupKey(rawUrl) {
+  const safe = sanitizeString(rawUrl, 2048);
+  if (!safe) return '';
+  try {
+    const parsed = new URL(safe);
+    const origin = String(parsed.origin || '').toLowerCase();
+    const pathname = String(parsed.pathname || '');
+    if (!origin || !pathname) return '';
+    return `${origin}${pathname}`;
+  } catch {
+    return '';
+  }
+}
+
+function findExistingDownload(url, filename, callback) {
+  const done = (found) => {
+    try { callback(found === true); } catch {}
+  };
+  const filenameRegex = `(^|[\\\\/])${escapeRegExp(filename)}$`;
+  chrome.downloads.search({ filenameRegex, state: 'complete' }, (filenameMatches) => {
+    if (Array.isArray(filenameMatches) && filenameMatches.length > 0) {
+      done(true);
+      return;
+    }
+    const key = normalizeDownloadLookupKey(url);
+    if (!key) {
+      done(false);
+      return;
+    }
+    const urlRegex = `^${escapeRegExp(key)}([?#]|$)`;
+    chrome.downloads.search({ urlRegex, state: 'complete' }, (urlMatches) => {
+      done(Array.isArray(urlMatches) && urlMatches.length > 0);
+    });
+  });
+}
+
 function isTrustedSender(sender) {
   if (!sender) return false;
   const tabUrl = String(sender.tab?.url || '');
@@ -853,17 +893,23 @@ function startBackgroundDownload(message, sendResponse) {
     sendResponse({ ok: false });
     return false;
   }
-  chrome.downloads.download({
-    url,
-    filename,
-    saveAs: false,
-    conflictAction: 'uniquify',
-  }, (downloadId) => {
-    if (chrome.runtime.lastError || typeof downloadId !== 'number') {
-      sendResponse({ ok: false });
+  findExistingDownload(url, filename, (exists) => {
+    if (exists) {
+      sendResponse({ ok: true, skipped: true, reason: 'duplicate' });
       return;
     }
-    sendResponse({ ok: true, downloadId });
+    chrome.downloads.download({
+      url,
+      filename,
+      saveAs: false,
+      conflictAction: 'uniquify',
+    }, (downloadId) => {
+      if (chrome.runtime.lastError || typeof downloadId !== 'number') {
+        sendResponse({ ok: false });
+        return;
+      }
+      sendResponse({ ok: true, downloadId });
+    });
   });
   return true;
 }
