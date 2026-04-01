@@ -8858,7 +8858,6 @@ async function renderAnalyzeTable(force = false) {
     const scopeKey = `profile:${safeHandle.toLowerCase()}`;
     const downloadedIds = getPublicDownloadedIds(scopeKey);
     const downloadedAssetKeys = getPublicDownloadedAssetKeys(scopeKey);
-    const seenAssetKeys = new Set();
     const out = [];
     const characterUserIds = await listCharacterUserIdsForProfileUser(targetUserId);
     const feedUserIds = [targetUserId, ...characterUserIds];
@@ -8883,17 +8882,11 @@ async function renderAnalyzeTable(force = false) {
         for (const item of items) {
           const postId = normalizeId(item?.id || item?.post?.id || item?.post_id || '');
           if (!postId) continue;
-          let mediaUrl = String(idToPublicDownloadUrl.get(postId) || '').trim();
-          if (!mediaUrl) {
-            mediaUrl = String(resolvePublicDownloadUrl(item) || '').trim();
-            if (mediaUrl) idToPublicDownloadUrl.set(postId, mediaUrl);
-          }
-          const assetKey = normalizeDownloadAssetKey(mediaUrl);
-          if (!mediaUrl || !assetKey) continue;
           if (downloadedIds.has(postId)) continue;
-          if (downloadedAssetKeys.has(assetKey) || seenAssetKeys.has(assetKey)) continue;
-          seenAssetKeys.add(assetKey);
-          out.push({ postId, url: mediaUrl, assetKey, scopeKey });
+          const knownUrl = String(idToPublicDownloadUrl.get(postId) || '').trim();
+          const knownAssetKey = normalizeDownloadAssetKey(knownUrl);
+          if (knownAssetKey && downloadedAssetKeys.has(knownAssetKey)) continue;
+          out.push({ postId, scopeKey });
         }
         const nextCursor = detectFeedNextCursor(feedJson);
         if (!nextCursor || seenCursors.has(nextCursor)) break;
@@ -8996,23 +8989,32 @@ async function renderAnalyzeTable(force = false) {
   function dedupeManualListCandidates(candidates) {
     const out = [];
     const seenPosts = new Set();
-    const seenAssets = new Set();
     for (const candidate of (Array.isArray(candidates) ? candidates : [])) {
       const postId = normalizeId(candidate?.postId || '');
-      const assetKey = normalizeDownloadAssetKey(candidate?.assetKey || candidate?.url || '');
-      const url = String(candidate?.url || '').trim();
-      if (!postId || !assetKey || !url) continue;
-      if (seenPosts.has(postId) || seenAssets.has(assetKey)) continue;
+      if (!postId || seenPosts.has(postId)) continue;
       seenPosts.add(postId);
-      seenAssets.add(assetKey);
       out.push({
         postId,
-        url,
-        assetKey,
         scopeKey: typeof candidate?.scopeKey === 'string' ? candidate.scopeKey : '',
       });
     }
     return out;
+  }
+
+  async function resolveFreshPublicDownloadCandidate(candidate) {
+    const postId = normalizeId(candidate?.postId || '');
+    if (!postId) return null;
+    let url = String(idToPublicDownloadUrl.get(postId) || '').trim();
+    if (!url) {
+      await fetchPostDetailForChain(postId, { retries: 2 });
+      url = String(idToPublicDownloadUrl.get(postId) || '').trim();
+    }
+    const assetKey = normalizeDownloadAssetKey(url);
+    if (!url || !assetKey) return null;
+    const scopeKey = typeof candidate?.scopeKey === 'string' ? candidate.scopeKey.trim() : '';
+    const downloadedAssetKeys = getPublicDownloadedAssetKeys(scopeKey || currentPublicDownloadScopeKey());
+    if (downloadedAssetKeys.has(assetKey)) return null;
+    return { postId, url, assetKey, scopeKey };
   }
 
   async function bulkDownloadFromManualList() {
@@ -9059,19 +9061,21 @@ async function renderAnalyzeTable(force = false) {
       let downloadedCount = 0;
       for (const candidate of candidates) {
         try {
+          const resolved = await resolveFreshPublicDownloadCandidate(candidate);
+          if (!resolved) continue;
           const filepaths = buildPublicDownloadPaths(candidate.postId);
           let downloaded = false;
           for (const filename of filepaths) {
-            const ok = await requestBackgroundDownload(candidate.url, filename);
+            const ok = await requestBackgroundDownload(resolved.url, filename);
             downloaded = downloaded || ok;
           }
           if (!downloaded) continue;
           downloadedCount += 1;
-          const scopeKey = typeof candidate.scopeKey === 'string' && candidate.scopeKey.trim()
-            ? candidate.scopeKey.trim()
+          const scopeKey = resolved.scopeKey
+            ? resolved.scopeKey
             : currentPublicDownloadScopeKey();
-          markPublicPostDownloaded(candidate.postId, scopeKey);
-          markPublicAssetDownloaded(candidate.assetKey, scopeKey);
+          markPublicPostDownloaded(resolved.postId, scopeKey);
+          markPublicAssetDownloaded(resolved.assetKey, scopeKey);
         } catch (err) {
           console.error('[SoraUV] List bulk download failed:', candidate.postId, err);
         }
