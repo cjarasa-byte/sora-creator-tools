@@ -114,7 +114,6 @@ test('listProfileBulkDownloadCandidates gathers profile feed entries and scopes 
     processCharactersJson: () => {},
     buildBackendJsonHeaders: () => ({}),
     normalizeId: (v) => String(v || '').trim(),
-    resolvePublicDownloadUrl: (item) => String(item?.downloadUrl || ''),
     normalizeDownloadAssetKey: (url) => String(url || '').split('?')[0].toLowerCase(),
     detectFeedNextCursor: (json) => json?.next_cursor || null,
     fetch: async (url) => {
@@ -151,21 +150,21 @@ test('listProfileBulkDownloadCandidates gathers profile feed entries and scopes 
   assert.deepEqual(result, [
     {
       postId: 's_1',
-      url: 'https://videos.openai.com/a.mp4?token=123',
-      assetKey: 'https://videos.openai.com/a.mp4',
+      scopeKey: 'profile:alpha',
+    },
+    {
+      postId: 's_2',
       scopeKey: 'profile:alpha',
     },
     {
       postId: 's_char_1',
-      url: 'https://videos.openai.com/char.mp4?token=123',
-      assetKey: 'https://videos.openai.com/char.mp4',
       scopeKey: 'profile:alpha',
     },
   ]);
   assert.deepEqual(historyScopes, ['profile:alpha']);
 });
 
-test('dedupeManualListCandidates removes repeated posts/assets without imposing hard caps', () => {
+test('dedupeManualListCandidates removes repeated posts without imposing hard caps', () => {
   const src = fs.readFileSync(INJECT_PATH, 'utf8');
   const normalizeIdStart = src.indexOf('  const normalizeId = (s) => s?.toString().split(/[?#]/)[0].trim();');
   const normalizeIdEnd = src.indexOf('  const getUniqueViews =', normalizeIdStart);
@@ -189,14 +188,15 @@ test('dedupeManualListCandidates removes repeated posts/assets without imposing 
     filename: 'inject-public-profile-list-dedupe.harness.js',
   });
   const result = JSON.parse(JSON.stringify(context.__fn([
-    { postId: 's_1', url: 'https://videos.openai.com/a.mp4?token=1', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:a' },
-    { postId: 's_1', url: 'https://videos.openai.com/a.mp4?token=2', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:a' }, // duplicate post
-    { postId: 's_2', url: 'https://videos.openai.com/a.mp4?token=3', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:b' }, // duplicate asset
-    { postId: 's_3', url: 'https://videos.openai.com/c.mp4', scopeKey: 'profile:c' },
+    { postId: 's_1', scopeKey: 'profile:a' },
+    { postId: 's_1', scopeKey: 'profile:a' }, // duplicate post
+    { postId: 's_2', scopeKey: 'profile:b' },
+    { postId: 's_3', scopeKey: 'profile:c' },
   ])));
   assert.deepEqual(result, [
-    { postId: 's_1', url: 'https://videos.openai.com/a.mp4?token=1', assetKey: 'https://videos.openai.com/a.mp4', scopeKey: 'profile:a' },
-    { postId: 's_3', url: 'https://videos.openai.com/c.mp4', assetKey: 'https://videos.openai.com/c.mp4', scopeKey: 'profile:c' },
+    { postId: 's_1', scopeKey: 'profile:a' },
+    { postId: 's_2', scopeKey: 'profile:b' },
+    { postId: 's_3', scopeKey: 'profile:c' },
   ]);
 });
 
@@ -225,12 +225,16 @@ test('bulkDownloadFromManualList downloads every listed profile without confirma
       const lower = String(handle).toLowerCase();
       return [{
         postId: `s_${lower}`,
-        url: `https://videos.openai.com/${lower}.mp4`,
-        assetKey: `https://videos.openai.com/${lower}.mp4`,
         scopeKey: `profile:${lower}`,
       }];
     },
     dedupeManualListCandidates: (rows) => rows,
+    resolveFreshPublicDownloadCandidate: async (candidate) => ({
+      postId: candidate.postId,
+      url: `https://videos.openai.com/${String(candidate.postId).slice(2)}.mp4`,
+      assetKey: `https://videos.openai.com/${String(candidate.postId).slice(2)}.mp4`,
+      scopeKey: candidate.scopeKey,
+    }),
     buildPublicDownloadPaths: (postId) => [`downloads/${postId}.mp4`],
     requestBackgroundDownload: async (url, filename) => {
       downloadedUrls.push({ url, filename });
